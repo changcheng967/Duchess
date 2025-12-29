@@ -424,11 +424,11 @@ private:
         occupied[BLACK] = 0;
         all_occupied = 0;
         
-        for (int p = 0; p < 6; p++) {
+        for (int p = W_PAWN; p <= W_KING; p++) {
             occupied[WHITE] |= pieces[p];
             all_occupied |= pieces[p];
         }
-        for (int p = 6; p < 12; p++) {
+        for (int p = B_PAWN; p <= B_KING; p++) {
             occupied[BLACK] |= pieces[p];
             all_occupied |= pieces[p];
         }
