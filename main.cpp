@@ -1514,7 +1514,7 @@ private:
         auto moves = pos.generate_legal_moves();
         if (moves.empty()) {
             if (pos.is_check()) {
-                return -30000; // Checkmate
+                return -30000 + depth; // Checkmate (prefer later mates)
             }
             return 0; // Stalemate
         }
@@ -1522,7 +1522,7 @@ private:
         int max_score = -40000;
         
         for (const auto& move : moves) {
-            pos.make_move(move);
+            if (!pos.make_move(move)) continue;  // Safety check
             int score = -alpha_beta(pos, depth - 1, -beta, -alpha);
             pos.undo_move(move);
             
@@ -1537,17 +1537,17 @@ private:
         return max_score;
     }
     
-    static Move find_best_move(Position& pos, int depth) {
+    static std::pair<Move, int> find_best_move(Position& pos, int depth) {
         auto moves = pos.generate_legal_moves();
         if (moves.empty()) {
-            return Move(); // No moves available
+            return {Move(), -40000};
         }
         
         Move best_move = moves[0];
         int best_score = -40000;
         
         for (const auto& move : moves) {
-            pos.make_move(move);
+            if (!pos.make_move(move)) continue;
             int score = -alpha_beta(pos, depth - 1, -40000, 40000);
             pos.undo_move(move);
             
@@ -1557,7 +1557,7 @@ private:
             }
         }
         
-        return best_move;
+        return {best_move, best_score};
     }
 
 public:
@@ -1576,22 +1576,7 @@ public:
                 break;
             }
             
-            Move current_best = find_best_move(pos, depth);
-            int current_score = -40000;
-            
-            // Re-calculate score for the best move
-            if (!current_best.data == 0) {
-                auto moves = pos.generate_legal_moves();
-                for (const auto& move : moves) {
-                    if (move == current_best) {
-                        if (pos.make_move(move)) {
-                            current_score = -alpha_beta(pos, depth - 1, -40000, 40000);
-                            pos.undo_move(move);
-                        }
-                        break;
-                    }
-                }
-            }
+            auto [current_best, current_score] = find_best_move(pos, depth);
             
             // Output search info
             std::cout << "info depth " << depth
@@ -1604,14 +1589,13 @@ public:
         
         // Output best move
         std::cout << "bestmove ";
-        if (best_move.data != 0) {  // Check if move is valid
+        if (best_move.data != 0) {
             char from_file = 'a' + file_of(best_move.from());
             char from_rank = '1' + rank_of(best_move.from());
             char to_file = 'a' + file_of(best_move.to());
             char to_rank = '1' + rank_of(best_move.to());
             std::cout << from_file << from_rank << to_file << to_rank;
             
-            // Add promotion piece if needed
             if (best_move.is_promotion()) {
                 char promo = "  nbrq"[best_move.promotion() % 6];
                 std::cout << promo;
