@@ -1596,13 +1596,16 @@ public:
 
 class Search {
 private:
-    // Helper function to evaluate position without relying on global accumulators
+    static uint64_t nodes_searched;  // Node counter
+    
+    // Helper function to evaluate position
     static int evaluate_position(const Position& pos) {
-        // Use the NNUE evaluation directly
-        return NNUE::evaluate(pos);
+        return pos.evaluate();
     }
     
     static int alpha_beta(Position& pos, int depth, int alpha, int beta) {
+        nodes_searched++;  // Count this node
+        
         if (depth == 0) {
             return evaluate_position(pos);
         }
@@ -1645,11 +1648,28 @@ private:
         for (const auto& move : moves) {
             Position temp_pos = pos; // Create copy to avoid modifying original
             if (!temp_pos.make_move(move)) continue;
+            
+            nodes_searched = 0;  // Reset node counter
             int score = -alpha_beta(temp_pos, depth - 1, -1000000, 1000000);
             
+            // Better move selection: prefer captures and center control
             if (score > best_score) {
                 best_score = score;
                 best_move = move;
+            } else if (score == best_score) {
+                // Tie-breaking: prefer captures, then center moves
+                if (move.is_capture() && !best_move.is_capture()) {
+                    best_score = score;
+                    best_move = move;
+                } else if (!move.is_capture() && !best_move.is_capture()) {
+                    // Prefer center pawn moves
+                    int to_file = file_of(move.to());
+                    int best_to_file = file_of(best_move.to());
+                    if ((to_file == 3 || to_file == 4) && (best_to_file != 3 && best_to_file != 4)) {
+                        best_score = score;
+                        best_move = move;
+                    }
+                }
             }
         }
         
@@ -1676,10 +1696,15 @@ public:
             Move current_best = result.first;
             int current_score = result.second;
             
+            // Calculate nodes per second
+            uint64_t nps = (elapsed > 0) ? (nodes_searched * 1000 / elapsed) : 0;
+            
             // Output search info
             std::cout << "info depth " << depth
                       << " score cp " << current_score
-                      << " time " << elapsed << " nodes 0 nps 0\n";
+                      << " time " << elapsed
+                      << " nodes " << nodes_searched
+                      << " nps " << nps << "\n";
             
             best_move = current_best;
             best_score = current_score;
@@ -1705,10 +1730,15 @@ public:
     }
 };
 
+// Initialize static member
+uint64_t Search::nodes_searched = 0;
+
 // ==================== UCI PROTOCOL ====================
 
 class UCI {
 private:
+    static Position current_position;  // Global position state
+    
     static void uci_loop() {
         std::string command;
         
@@ -1718,7 +1748,7 @@ private:
             ss >> token;
             
             if (token == "uci") {
-                std::cout << "id name Duchess NNUE Chess Engine\n";
+                std::cout << "id name Duchess Chess Engine\n";
                 std::cout << "id author changcheng967\n";
                 std::cout << "option name Hash type spin default 16 min 1 max 1024\n";
                 std::cout << "uciok\n";
@@ -1727,7 +1757,8 @@ private:
                 std::cout << "readyok\n";
             }
             else if (token == "ucinewgame") {
-                // Clear hash tables, etc.
+                // Reset to starting position
+                current_position.from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
             }
             else if (token == "position") {
                 std::string fen;
@@ -1751,9 +1782,8 @@ private:
                     moves.push_back(part);
                 }
                 
-                // Apply position and moves
-                Position temp_pos;
-                temp_pos.from_fen(fen);
+                // Apply position and moves to global state
+                current_position.from_fen(fen);
                 
                 // Apply moves
                 for (const auto& move_str : moves) {
@@ -1768,12 +1798,9 @@ private:
                         int to = to_file + to_rank * 8;
                         
                         Move move(from, to);
-                        temp_pos.make_move(move);
+                        current_position.make_move(move);
                     }
                 }
-                
-                // Update global position (in a real implementation, this would be stateful)
-                // For now, we'll just use the position in the go command
             }
             else if (token == "go") {
                 // Parse go command
@@ -1789,10 +1816,8 @@ private:
                     }
                 }
                 
-                // Start search with iterative deepening
-                Position pos;
-                pos.from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
-                Search::iterative_deepening(pos, depth, time);
+                // Start search with iterative deepening using current position
+                Search::iterative_deepening(current_position, depth, time);
             }
             else if (token == "quit") {
                 break;
@@ -1801,9 +1826,8 @@ private:
                 int depth;
                 ss >> depth;
                 
-                Position pos;
                 auto start = std::chrono::high_resolution_clock::now();
-                uint64_t nodes = Perft::perft(pos, depth);
+                uint64_t nodes = Perft::perft(current_position, depth);
                 auto end = std::chrono::high_resolution_clock::now();
                 auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
                 
@@ -1817,11 +1841,17 @@ private:
     
 public:
     static void start() {
+        // Initialize starting position
+        current_position.from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+        
         Attacks::init();
         // NNUE::init(); // Commented out - using classical evaluation
         uci_loop();
     }
 };
+
+// Initialize static member
+Position UCI::current_position;
 
 // Classical evaluation (material counting)
 int Position::evaluate() const {
