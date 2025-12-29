@@ -11,6 +11,7 @@
 #include <chrono>
 #include <sstream>
 #include <iomanip>
+#include <fstream>
 
 // ==================== CONSTANTS AND TYPES ====================
 
@@ -373,6 +374,15 @@ Bitboard Attacks::queen_attacks(int sq, Bitboard occupied) {
 
 // ==================== POSITION CLASS ====================
 
+// Undo information for move undo
+struct UndoInfo {
+    int captured_piece;
+    int castling_rights;
+    int en_passant_square;
+    int halfmove_clock;
+    Bitboard hash;
+};
+
 class Position {
 private:
     // Bitboards for each piece type
@@ -392,6 +402,9 @@ private:
     
     // Material count
     int material[2];
+    
+    // Move history for undo
+    std::vector<UndoInfo> history;
     
     // Update hash when piece moves
     void update_hash_remove(int piece, int square) {
@@ -451,6 +464,7 @@ public:
     std::vector<Move> generate_moves() const;
     std::vector<Move> generate_captures() const;
     std::vector<Move> generate_quiet_moves() const;
+    std::vector<Move> generate_legal_moves() const;
     
     // Move execution
     bool make_move(const Move& move);
@@ -467,6 +481,9 @@ public:
     // FEN handling
     std::string to_fen() const;
     void from_fen(const std::string& fen);
+    
+    // Evaluation
+    int evaluate() const;
     
     // Debug
     void print() const;
@@ -668,6 +685,27 @@ std::vector<Move> Position::generate_quiet_moves() const {
     return quiet;
 }
 
+// Generate legal moves (filter out moves that leave king in check)
+std::vector<Move> Position::generate_legal_moves() const {
+    auto pseudo_legal = generate_moves();
+    std::vector<Move> legal;
+    
+    int our_color = side_to_move;  // Save before make_move
+    
+    for (const auto& move : pseudo_legal) {
+        Position temp = *this;
+        if (!temp.make_move(move)) continue;  // Check if move succeeded
+        
+        // Check if our king is in check after the move
+        int king_sq = lsb(temp.pieces[our_color == WHITE ? W_KING : B_KING]);
+        if (!temp.is_square_attacked(king_sq, 1 - our_color)) {
+            legal.push_back(move);
+        }
+    }
+    
+    return legal;
+}
+
 // ==================== POSITION IMPLEMENTATION ====================
 
 Position::Position() {
@@ -680,10 +718,11 @@ Position::Position(const std::string& fen) {
 
 void Position::from_fen(const std::string& fen) {
     // Reset everything
-    for (int i = 0; i < 12; i++) pieces[i] = 0;
+    for (int i = 0; i <= 12; i++) pieces[i] = 0;
     occupied[WHITE] = occupied[BLACK] = all_occupied = 0;
     hash = 0;
     material[WHITE] = material[BLACK] = 0;
+    history.clear();  // Clear history for new position
     
     std::istringstream ss(fen);
     std::string board, side, castling, enpassant;
@@ -819,6 +858,7 @@ std::string Position::to_fen() const {
     return fen;
 }
 
+
 void Position::print() const {
     std::cout << "\nPosition:\n";
     for (int rank = 7; rank >= 0; rank--) {
@@ -846,6 +886,226 @@ void Position::print() const {
     std::cout << "Hash: 0x" << std::hex << hash << std::dec << "\n";
 }
 
+// ==================== NNUE EVALUATION ====================
+
+namespace NNUE {
+    // NNUE network structure constants
+    constexpr int INPUT_SIZE = 768;    // HalfKAv2 input features
+    constexpr int HIDDEN_SIZE = 512;   // Hidden layer size
+    constexpr int OUTPUT_SIZE = 1;     // Single output (evaluation)
+    
+    // Feature indices for HalfKAv2
+    constexpr int KING_SQUARE_WHITE = 0;
+    constexpr int KING_SQUARE_BLACK = 64;
+    constexpr int PIECE_SQUARES_WHITE = 128;
+    constexpr int PIECE_SQUARES_BLACK = 512;
+    
+    // Network weights and biases (simplified - would load from .nnue file)
+    alignas(64) static int16_t input_weights[INPUT_SIZE][HIDDEN_SIZE];
+    alignas(64) static int16_t hidden_weights[HIDDEN_SIZE][OUTPUT_SIZE];
+    alignas(64) static int32_t input_biases[HIDDEN_SIZE];
+    alignas(64) static int32_t hidden_biases[OUTPUT_SIZE];
+    
+    // Feature accumulator
+    alignas(64) static int16_t accumulator_white[INPUT_SIZE];
+    alignas(64) static int16_t accumulator_black[INPUT_SIZE];
+    
+    // Dirty piece tracking for incremental updates
+    struct DirtyPiece {
+        int dirty_num;
+        int piece[3];
+        int from[3];
+        int to[3];
+    };
+    
+    // Load NNUE weights from file
+    bool load_nnue(const std::string& filename) {
+        std::ifstream file(filename, std::ios::binary);
+        if (!file.is_open()) {
+            std::cerr << "Failed to open NNUE file: " << filename << std::endl;
+            return false;
+        }
+        
+        // Read header (simplified - real NNUE has complex header)
+        uint32_t magic;
+        file.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+        
+        // Read input weights
+        file.read(reinterpret_cast<char*>(input_weights), sizeof(input_weights));
+        
+        // Read hidden weights
+        file.read(reinterpret_cast<char*>(hidden_weights), sizeof(hidden_weights));
+        
+        // Read input biases
+        file.read(reinterpret_cast<char*>(input_biases), sizeof(input_biases));
+        
+        // Read hidden biases
+        file.read(reinterpret_cast<char*>(hidden_biases), sizeof(hidden_biases));
+        
+        file.close();
+        
+        // Initialize accumulators
+        for (int i = 0; i < INPUT_SIZE; i++) {
+            accumulator_white[i] = 0;
+            accumulator_black[i] = 0;
+        }
+        
+        return true;
+    }
+    
+    // Initialize NNUE weights (placeholder - would load from .nnue file)
+    void init() {
+        // Try to load real NNUE file first
+        if (!load_nnue("C:\\Users\\chang\\Downloads\\Duchess\\nn-2962dca31855.nnue")) {
+            std::cout << "NNUE file not found, using random weights\n";
+            // Fallback to random initialization
+            std::mt19937_64 rng(123456789);
+            
+            for (int i = 0; i < INPUT_SIZE; i++) {
+                for (int j = 0; j < HIDDEN_SIZE; j++) {
+                    input_weights[i][j] = (int16_t)(rng() % 256 - 128);
+                }
+            }
+            
+            for (int i = 0; i < HIDDEN_SIZE; i++) {
+                for (int j = 0; j < OUTPUT_SIZE; j++) {
+                    hidden_weights[i][j] = (int16_t)(rng() % 256 - 128);
+                }
+                input_biases[i] = (int32_t)(rng() % 1024 - 512);
+            }
+            
+            for (int i = 0; i < OUTPUT_SIZE; i++) {
+                hidden_biases[i] = (int32_t)(rng() % 1024 - 512);
+            }
+        }
+        
+        // Initialize accumulators
+        for (int i = 0; i < INPUT_SIZE; i++) {
+            accumulator_white[i] = 0;
+            accumulator_black[i] = 0;
+        }
+    }
+    
+    // Convert piece and square to feature index
+    int get_feature_index(int piece, int square, bool is_white) {
+        if (piece == W_KING || piece == B_KING) {
+            return is_white ? KING_SQUARE_WHITE + square : KING_SQUARE_BLACK + square;
+        }
+        
+        int base_index = is_white ? PIECE_SQUARES_WHITE : PIECE_SQUARES_BLACK;
+        int piece_type = piece % 6; // 0-5 for pawn-knight-bishop-rook-queen-king
+        return base_index + piece_type * 64 + square;
+    }
+    
+    // Update accumulator for a piece move
+    void update_accumulator(const Position& pos, const DirtyPiece& dp, bool is_white) {
+        int16_t* acc = is_white ? accumulator_white : accumulator_black;
+        
+        for (int i = 0; i < dp.dirty_num; i++) {
+            int piece = dp.piece[i];
+            int from = dp.from[i];
+            int to = dp.to[i];
+            
+            // Remove old feature
+            if (from != -1) {
+                int idx = get_feature_index(piece, from, is_white);
+                acc[idx] = 0;
+            }
+            
+            // Add new feature
+            if (to != -1) {
+                int idx = get_feature_index(piece, to, is_white);
+                acc[idx] = 1;
+            }
+        }
+    }
+    
+    // Refresh accumulator (full recomputation)
+    void refresh_accumulator(const Position& pos, bool is_white) {
+        int16_t* acc = is_white ? accumulator_white : accumulator_black;
+        
+        // Clear accumulator
+        for (int i = 0; i < INPUT_SIZE; i++) {
+            acc[i] = 0;
+        }
+        
+        // Set king position
+        int king_sq = lsb(pos.get_pieces(is_white ? W_KING : B_KING));
+        int king_idx = is_white ? KING_SQUARE_WHITE + king_sq : KING_SQUARE_BLACK + king_sq;
+        acc[king_idx] = 1;
+        
+        // Set piece positions
+        int base_idx = is_white ? PIECE_SQUARES_WHITE : PIECE_SQUARES_BLACK;
+        
+        // White pieces
+        for (int p = W_PAWN; p <= W_KING; p++) {
+            Bitboard pieces = pos.get_pieces(p);
+            while (pieces) {
+                int sq = lsb(pieces);
+                pieces = clear_lsb(pieces);
+                int piece_type = p % 6;
+                acc[base_idx + piece_type * 64 + sq] = 1;
+            }
+        }
+        
+        // Black pieces
+        for (int p = B_PAWN; p <= B_KING; p++) {
+            Bitboard pieces = pos.get_pieces(p);
+            while (pieces) {
+                int sq = lsb(pieces);
+                pieces = clear_lsb(pieces);
+                int piece_type = p % 6;
+                acc[base_idx + piece_type * 64 + sq] = 1;
+            }
+        }
+    }
+    
+    // Apply ReLU activation
+    int32_t relu(int32_t x) {
+        return x > 0 ? x : 0;
+    }
+    
+    // Evaluate position using NNUE
+    int evaluate(const Position& pos) {
+        // Update accumulators for both sides
+        DirtyPiece dp_white = {0};
+        DirtyPiece dp_black = {0};
+        
+        // For now, do full refresh (optimization: implement incremental updates)
+        refresh_accumulator(pos, true);
+        refresh_accumulator(pos, false);
+        
+        // Forward pass through network
+        alignas(64) int32_t hidden[HIDDEN_SIZE];
+        
+        // Input layer to hidden layer
+        for (int j = 0; j < HIDDEN_SIZE; j++) {
+            int32_t sum = input_biases[j];
+            
+            // White features
+            for (int i = 0; i < INPUT_SIZE; i++) {
+                sum += accumulator_white[i] * input_weights[i][j];
+            }
+            
+            // Black features
+            for (int i = 0; i < INPUT_SIZE; i++) {
+                sum += accumulator_black[i] * input_weights[i][j];
+            }
+            
+            hidden[j] = relu(sum);
+        }
+        
+        // Hidden layer to output
+        int32_t output = hidden_biases[0];
+        for (int j = 0; j < HIDDEN_SIZE; j++) {
+            output += hidden[j] * hidden_weights[j][0];
+        }
+        
+        // Scale output to centipawns
+        return output / 16;
+    }
+}
+
 // ==================== MOVE EXECUTION ====================
 
 bool Position::make_move(const Move& move) {
@@ -855,7 +1115,7 @@ bool Position::make_move(const Move& move) {
     int captured = -1;
     
     // Find the moving piece
-    for (int p = 0; p < 12; p++) {
+    for (int p = 1; p <= 12; p++) {  // Fixed: Check pieces 1-12
         if (pieces[p] & SQ(from)) {
             piece = p;
             break;
@@ -866,6 +1126,39 @@ bool Position::make_move(const Move& move) {
     
     int color = (piece < 6) ? WHITE : BLACK;
     int enemy = 1 - color;
+    
+    // Store undo information
+    UndoInfo undo;
+    undo.castling_rights = castling_rights;
+    undo.en_passant_square = en_passant_square;
+    undo.halfmove_clock = halfmove_clock;
+    undo.hash = hash;
+    
+    // Handle captures
+    if (move.is_capture()) {
+        if (move.is_enpassant()) {
+            // En passant capture
+            int ep_target = to + (color == WHITE ? SOUTH : NORTH);
+            for (int p = 0; p < 12; p++) {
+                if (pieces[p] & SQ(ep_target)) {
+                    captured = p;
+                    undo.captured_piece = captured;
+                    break;
+                }
+            }
+        } else {
+            // Normal capture
+            for (int p = 0; p < 12; p++) {
+                if (pieces[p] & SQ(to)) {
+                    captured = p;
+                    undo.captured_piece = captured;
+                    break;
+                }
+            }
+        }
+    } else {
+        undo.captured_piece = -1;
+    }
     
     // Update hash
     update_hash_remove(piece, from);
@@ -987,13 +1280,102 @@ bool Position::make_move(const Move& move) {
     halfmove_clock = (piece == W_PAWN || piece == B_PAWN || captured != -1) ? 0 : halfmove_clock + 1;
     if (color == BLACK) fullmove_number++;
     
+    // Store undo info
+    history.push_back(undo);
+    
     return true;
 }
 
 void Position::undo_move(const Move& move) {
-    // This is a simplified undo - in a real engine you'd store more state
-    // For now, we'll just re-parse from FEN which is inefficient but works
-    // In practice, you'd store the previous state
+    if (history.empty()) return;
+    
+    UndoInfo undo = history.back();
+    history.pop_back();
+    
+    int from = move.from();
+    int to = move.to();
+    int piece = -1;
+    
+    // Find the moving piece
+    for (int p = 1; p <= 12; p++) {
+        if (pieces[p] & SQ(to)) {
+            piece = p;
+            break;
+        }
+    }
+    
+    if (piece == -1) return; // No piece to undo
+    
+    int color = (piece < 6) ? WHITE : BLACK;
+    int enemy = 1 - color;
+    
+    // Restore hash
+    hash = undo.hash;
+    
+    // Restore game state
+    castling_rights = undo.castling_rights;
+    en_passant_square = undo.en_passant_square;
+    halfmove_clock = undo.halfmove_clock;
+    
+    // Restore piece position
+    pieces[piece] ^= SQ(from) | SQ(to);
+    occupied[color] ^= SQ(from) | SQ(to);
+    all_occupied ^= SQ(from) | SQ(to);
+    
+    // Restore captured piece if any
+    if (undo.captured_piece != -1) {
+        int capture_sq = to;
+        
+        // En passant: captured pawn is on different square
+        if (move.is_enpassant()) {
+            capture_sq = to + (color == WHITE ? SOUTH : NORTH);
+        }
+        
+        pieces[undo.captured_piece] |= SQ(capture_sq);
+        occupied[enemy] |= SQ(capture_sq);
+        all_occupied |= SQ(capture_sq);
+    }
+    
+    // Handle special moves
+    if (move.is_castle()) {
+        // King-side castling
+        if (to == G1 || to == G8) {
+            int rook_from = (color == WHITE) ? H1 : H8;
+            int rook_to = (color == WHITE) ? F1 : F8;
+            int rook = (color == WHITE) ? W_ROOK : B_ROOK;
+            
+            pieces[rook] ^= SQ(rook_from) | SQ(rook_to);
+            occupied[color] ^= SQ(rook_from) | SQ(rook_to);
+            all_occupied ^= SQ(rook_from) | SQ(rook_to);
+        }
+        // Queen-side castling
+        else if (to == C1 || to == C8) {
+            int rook_from = (color == WHITE) ? A1 : A8;
+            int rook_to = (color == WHITE) ? D1 : D8;
+            int rook = (color == WHITE) ? W_ROOK : B_ROOK;
+            
+            pieces[rook] ^= SQ(rook_from) | SQ(rook_to);
+            occupied[color] ^= SQ(rook_from) | SQ(rook_to);
+            all_occupied ^= SQ(rook_from) | SQ(rook_to);
+        }
+    }
+    
+    // Handle promotion
+    if (move.is_promotion()) {
+        int pawn = (color == WHITE) ? W_PAWN : B_PAWN;
+        
+        // Remove promoted piece
+        pieces[move.promotion()] ^= SQ(to);
+        
+        // Restore pawn
+        pieces[pawn] ^= SQ(to);
+    }
+    
+    // Restore side to move
+    side_to_move = color;
+    
+    // Update occupancy
+    update_occupancy();
 }
 
 // ==================== GAME STATE CHECKS ====================
@@ -1002,7 +1384,10 @@ Bitboard Position::get_attacks_to(int square, int attacker_color) const {
     Bitboard attacks = 0;
     
     // Pawns
-    attacks |= Attacks::pawn_attacks(attacker_color, square) & pieces[attacker_color == WHITE ? W_PAWN : B_PAWN];
+    int pawn_piece = attacker_color == WHITE ? W_PAWN : B_PAWN;
+    Bitboard enemy_pawns = pieces[pawn_piece];
+    Bitboard pawn_attack_sources = Attacks::pawn_attacks(1 - attacker_color, square);
+    attacks |= enemy_pawns & pawn_attack_sources;
     
     // Knights
     attacks |= Attacks::knight_attacks(square) & pieces[attacker_color == WHITE ? W_KNIGHT : B_KNIGHT];
@@ -1052,8 +1437,8 @@ bool Position::is_repetition() const {
 
 bool Position::is_insufficient_material() const {
     // Simplified - just check for bare kings
-    return (occupied[WHITE] == pieces[side_to_move == WHITE ? W_KING : B_KING]) &&
-           (occupied[BLACK] == pieces[side_to_move == BLACK ? W_KING : B_KING]);
+    return (occupied[WHITE] == pieces[W_KING]) &&
+           (occupied[BLACK] == pieces[B_KING]);
 }
 
 bool Position::is_game_over() const {
@@ -1117,6 +1502,113 @@ public:
     }
 };
 
+// ==================== SEARCH ALGORITHM ====================
+
+class Search {
+private:
+    static int alpha_beta(Position& pos, int depth, int alpha, int beta) {
+        if (depth == 0) {
+            return pos.evaluate();
+        }
+        
+        auto moves = pos.generate_legal_moves();
+        if (moves.empty()) {
+            if (pos.is_check()) {
+                return -30000; // Checkmate
+            }
+            return 0; // Stalemate
+        }
+        
+        int max_score = -40000;
+        
+        for (const auto& move : moves) {
+            pos.make_move(move);
+            int score = -alpha_beta(pos, depth - 1, -beta, -alpha);
+            pos.undo_move(move);
+            
+            max_score = std::max(max_score, score);
+            alpha = std::max(alpha, score);
+            
+            if (alpha >= beta) {
+                break; // Beta cutoff
+            }
+        }
+        
+        return max_score;
+    }
+    
+    static Move find_best_move(Position& pos, int depth) {
+        auto moves = pos.generate_legal_moves();
+        if (moves.empty()) {
+            return Move(); // No moves available
+        }
+        
+        Move best_move = moves[0];
+        int best_score = -40000;
+        
+        for (const auto& move : moves) {
+            pos.make_move(move);
+            int score = -alpha_beta(pos, depth - 1, -40000, 40000);
+            pos.undo_move(move);
+            
+            if (score > best_score) {
+                best_score = score;
+                best_move = move;
+            }
+        }
+        
+        return best_move;
+    }
+
+public:
+    static void iterative_deepening(Position& pos, int max_depth, int time_limit_ms) {
+        auto start_time = std::chrono::high_resolution_clock::now();
+        
+        Move best_move;
+        int best_score = 0;
+        
+        for (int depth = 1; depth <= max_depth; depth++) {
+            auto current_time = std::chrono::high_resolution_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                current_time - start_time).count();
+            
+            if (elapsed >= time_limit_ms) {
+                break;
+            }
+            
+            Move current_best = find_best_move(pos, depth);
+            int current_score = alpha_beta(pos, depth, -40000, 40000);
+            
+            // Output search info
+            std::cout << "info depth " << depth
+                      << " score cp " << current_score
+                      << " time " << elapsed << " nodes 0 nps 0\n";
+            
+            best_move = current_best;
+            best_score = current_score;
+        }
+        
+        // Output best move
+        std::cout << "bestmove ";
+        if (best_move.data != 0) {  // Check if move is valid
+            char from_file = 'a' + file_of(best_move.from());
+            char from_rank = '1' + rank_of(best_move.from());
+            char to_file = 'a' + file_of(best_move.to());
+            char to_rank = '1' + rank_of(best_move.to());
+            std::cout << from_file << from_rank << to_file << to_rank;
+            
+            // Add promotion piece if needed
+            if (best_move.is_promotion()) {
+                char promo = "  nbrq"[best_move.promotion() % 6];
+                std::cout << promo;
+            }
+        } else {
+            std::cout << "(none)";
+        }
+        std::cout << "\n";
+    }
+};
+
 // ==================== UCI PROTOCOL ====================
 
 class UCI {
@@ -1130,8 +1622,8 @@ private:
             ss >> token;
             
             if (token == "uci") {
-                std::cout << "id name Duchess Chess Engine\n";
-                std::cout << "id author Kilo Code\n";
+                std::cout << "id name Duchess NNUE Chess Engine\n";
+                std::cout << "id author changcheng967\n";
                 std::cout << "option name Hash type spin default 16 min 1 max 1024\n";
                 std::cout << "uciok\n";
             }
@@ -1168,19 +1660,21 @@ private:
             else if (token == "go") {
                 // Parse go command
                 int depth = 8; // Default depth
-                int time = 1000; // Default time in ms
+                int time = 900; // Default time in ms (1 second limit)
                 
                 while (ss >> token) {
                     if (token == "depth") ss >> depth;
                     else if (token == "wtime" || token == "btime") {
                         int time_ms; ss >> time_ms;
                         time = time_ms / 40; // Rough time allocation
+                        if (time > 900) time = 900; // Cap at 900ms
                     }
                 }
                 
-                // Start search
-                std::cout << "info depth " << depth << " score cp 0 nodes 0 nps 0 time 0 pv e2e4\n";
-                std::cout << "bestmove e2e4\n";
+                // Start search with iterative deepening
+                Position pos;
+                pos.from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+                Search::iterative_deepening(pos, depth, time);
             }
             else if (token == "quit") {
                 break;
@@ -1206,9 +1700,39 @@ private:
 public:
     static void start() {
         Attacks::init();
+        NNUE::init();
         uci_loop();
     }
 };
+
+// Add classical evaluation function (placeholder for NNUE)
+int Position::evaluate() const {
+    // Material values (centipawns)
+    const int piece_values[13] = {
+        0,    // EMPTY
+        100, 320, 330, 500, 900, 20000,  // White pieces: P, N, B, R, Q, K
+        100, 320, 330, 500, 900, 20000   // Black pieces: P, N, B, R, Q, K
+    };
+    
+    int score = 0;
+    
+    // Count material for each side
+    for (int p = W_PAWN; p <= W_KING; p++) {
+        score += popcount(pieces[p]) * piece_values[p];
+    }
+    for (int p = B_PAWN; p <= B_KING; p++) {
+        score -= popcount(pieces[p]) * piece_values[p];
+    }
+    
+    // Apply side-to-move bonus (tempo)
+    if (side_to_move == WHITE) {
+        score += 10; // Small bonus for having the move
+    } else {
+        score -= 10;
+    }
+    
+    return score;
+}
 
 // ==================== MAIN FUNCTION ====================
 
@@ -1222,10 +1746,33 @@ int main() {
     // Test basic functionality
     Position pos;
     std::cout << "Starting position:\n";
+    
+    // Debug: Print piece bitboards
+    for (int p = 1; p <= 12; p++) {
+        std::cout << "Piece " << p << " (" << ".PNBRQKpnbrqk"[p] << "): ";
+        Bitboard b = pos.get_pieces(p);
+        for (int sq = 0; sq < 64; sq++) {
+            if (b & SQ(sq)) {
+                std::cout << sq << " ";
+            }
+        }
+        std::cout << "\n";
+    }
+    
     pos.print();
     
     auto moves = pos.generate_moves();
-    std::cout << "\nGenerated " << moves.size() << " legal moves\n";
+    std::cout << "\nGenerated " << moves.size() << " pseudo-legal moves\n";
+    
+    // Debug castling
+    std::cout << "Castling rights: " << pos.get_castling_rights() << "\n";
+    std::cout << "White KS: " << (pos.get_castling_rights() & WHITE_KS) << "\n";
+    std::cout << "White QS: " << (pos.get_castling_rights() & WHITE_QS) << "\n";
+    
+    // Test evaluation
+    std::cout << "\nEvaluating position...\n";
+    int eval = pos.evaluate();
+    std::cout << "Classical evaluation: " << eval << " centipawns\n";
     
     // Test perft
     std::cout << "\nTesting perft (depth 3):\n";
