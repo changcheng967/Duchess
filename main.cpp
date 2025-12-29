@@ -1025,8 +1025,8 @@ namespace NNUE {
         
         // Fallback: Initialize with small random weights
         std::mt19937 rng(123456789);
-        std::uniform_int_distribution<int16_t> dist_ft(-127, 127);
-        std::uniform_int_distribution<int8_t> dist_layer(-127, 127);
+        std::uniform_int_distribution<int> dist_ft(-127, 127);
+        std::uniform_int_distribution<int> dist_layer(-127, 127);
         
         for (int i = 0; i < FEATURE_TRANSFORMER_OUTPUT; i++) {
             feature_biases[i] = 0;
@@ -1034,7 +1034,7 @@ namespace NNUE {
         
         for (int i = 0; i < FEATURE_TRANSFORMER_INPUT; i++) {
             for (int j = 0; j < FEATURE_TRANSFORMER_OUTPUT; j++) {
-                feature_weights[i][j] = dist_ft(rng);
+                feature_weights[i][j] = static_cast<int16_t>(dist_ft(rng));
             }
         }
         
@@ -1044,7 +1044,7 @@ namespace NNUE {
         
         for (int i = 0; i < LAYER1_INPUT; i++) {
             for (int j = 0; j < LAYER1_OUTPUT; j++) {
-                layer1_weights[i][j] = dist_layer(rng);
+                layer1_weights[i][j] = static_cast<int8_t>(dist_layer(rng));
             }
         }
         
@@ -1054,13 +1054,13 @@ namespace NNUE {
         
         for (int i = 0; i < LAYER2_INPUT; i++) {
             for (int j = 0; j < LAYER2_OUTPUT; j++) {
-                layer2_weights[i][j] = dist_layer(rng);
+                layer2_weights[i][j] = static_cast<int8_t>(dist_layer(rng));
             }
         }
         
         output_bias = 0;
         for (int i = 0; i < LAYER2_OUTPUT; i++) {
-            output_weights[i] = dist_layer(rng);
+            output_weights[i] = static_cast<int8_t>(dist_layer(rng));
         }
         
         nnue_loaded = false; // Mark as not properly loaded
