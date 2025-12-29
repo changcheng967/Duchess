@@ -120,7 +120,7 @@ constexpr int SOUTH_WEST = SOUTH + WEST;
 
 class Zobrist {
 private:
-    static constexpr int NUM_PIECES = 12;
+    static constexpr int NUM_PIECES = 13;
     static constexpr int NUM_SQUARES = 64;
     static constexpr int NUM_CASTLING = 16;
     
@@ -134,7 +134,7 @@ private:
 public:
     Zobrist() : rng(123456789) {
         // Initialize random keys
-        for (int p = 0; p < NUM_PIECES; p++) {
+        for (int p = 1; p <= 12; p++) {
             for (int s = 0; s < NUM_SQUARES; s++) {
                 piece_keys[p][s] = rng();
             }
@@ -376,7 +376,7 @@ Bitboard Attacks::queen_attacks(int sq, Bitboard occupied) {
 class Position {
 private:
     // Bitboards for each piece type
-    Bitboard pieces[12]; // 0-5: white, 6-11: black
+    Bitboard pieces[13]; // 0: empty (unused), 1-6: white, 7-12: black
     Bitboard occupied[2]; // White and black occupancy
     Bitboard all_occupied;
     
@@ -773,7 +773,7 @@ std::string Position::to_fen() const {
             int sq = make_sq(file, rank);
             bool found = false;
             
-            for (int p = 0; p < 12; p++) {
+            for (int p = W_PAWN; p <= B_KING; p++) {
                 if (pieces[p] & SQ(sq)) {
                     if (empty > 0) {
                         fen += std::to_string(empty);
@@ -826,7 +826,7 @@ void Position::print() const {
             int sq = make_sq(file, rank);
             bool found = false;
             
-            for (int p = 0; p < 12; p++) {
+            for (int p = W_PAWN; p <= B_KING; p++) {
                 if (pieces[p] & SQ(sq)) {
                     char piece_char = ".PNBRQKpnbrqk"[p];
                     std::cout << piece_char << " ";
