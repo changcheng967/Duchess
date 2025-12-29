@@ -1133,7 +1133,8 @@ namespace NNUE {
         }
         
         // Scale output to centipawns
-        return output / 16;
+        // The NNUE output might need different scaling
+        return output / 1024; // Even more conservative scaling
     }
 }
 
