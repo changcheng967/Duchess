@@ -1818,14 +1818,38 @@ private:
 public:
     static void start() {
         Attacks::init();
-        NNUE::init();
+        // NNUE::init(); // Commented out - using classical evaluation
         uci_loop();
     }
 };
 
-// Replace classical evaluation with NNUE
+// Classical evaluation (material counting)
 int Position::evaluate() const {
-    return NNUE::evaluate(*this);
+    // Material values (in centipawns)
+    const int PAWN_VALUE = 100;
+    const int KNIGHT_VALUE = 320;
+    const int BISHOP_VALUE = 330;
+    const int ROOK_VALUE = 500;
+    const int QUEEN_VALUE = 900;
+    
+    int score = 0;
+    
+    // Count material for white
+    score += popcount(pieces[W_PAWN]) * PAWN_VALUE;
+    score += popcount(pieces[W_KNIGHT]) * KNIGHT_VALUE;
+    score += popcount(pieces[W_BISHOP]) * BISHOP_VALUE;
+    score += popcount(pieces[W_ROOK]) * ROOK_VALUE;
+    score += popcount(pieces[W_QUEEN]) * QUEEN_VALUE;
+    
+    // Count material for black (subtract)
+    score -= popcount(pieces[B_PAWN]) * PAWN_VALUE;
+    score -= popcount(pieces[B_KNIGHT]) * KNIGHT_VALUE;
+    score -= popcount(pieces[B_BISHOP]) * BISHOP_VALUE;
+    score -= popcount(pieces[B_ROOK]) * ROOK_VALUE;
+    score -= popcount(pieces[B_QUEEN]) * QUEEN_VALUE;
+    
+    // Return from side to move's perspective
+    return (side_to_move == WHITE) ? score : -score;
 }
 
 // ==================== MAIN FUNCTION ====================
