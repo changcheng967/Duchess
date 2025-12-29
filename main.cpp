@@ -1522,9 +1522,9 @@ private:
         int max_score = -40000;
         
         for (const auto& move : moves) {
-            if (!pos.make_move(move)) continue;  // Safety check
-            int score = -alpha_beta(pos, depth - 1, -beta, -alpha);
-            pos.undo_move(move);
+            Position temp_pos = pos; // Create copy to avoid modifying original
+            if (!temp_pos.make_move(move)) continue;  // Safety check
+            int score = -alpha_beta(temp_pos, depth - 1, -beta, -alpha);
             
             max_score = std::max(max_score, score);
             alpha = std::max(alpha, score);
@@ -1547,9 +1547,9 @@ private:
         int best_score = -40000;
         
         for (const auto& move : moves) {
-            if (!pos.make_move(move)) continue;
-            int score = -alpha_beta(pos, depth - 1, -40000, 40000);
-            pos.undo_move(move);
+            Position temp_pos = pos; // Create copy to avoid modifying original
+            if (!temp_pos.make_move(move)) continue;
+            int score = -alpha_beta(temp_pos, depth - 1, -40000, 40000);
             
             if (score > best_score) {
                 best_score = score;
@@ -1705,33 +1705,9 @@ public:
     }
 };
 
-// Add classical evaluation function (placeholder for NNUE)
+// Replace classical evaluation with NNUE
 int Position::evaluate() const {
-    // Material values (centipawns)
-    const int piece_values[13] = {
-        0,    // EMPTY
-        100, 320, 330, 500, 900, 20000,  // White pieces: P, N, B, R, Q, K
-        100, 320, 330, 500, 900, 20000   // Black pieces: P, N, B, R, Q, K
-    };
-    
-    int score = 0;
-    
-    // Count material for each side
-    for (int p = W_PAWN; p <= W_KING; p++) {
-        score += popcount(pieces[p]) * piece_values[p];
-    }
-    for (int p = B_PAWN; p <= B_KING; p++) {
-        score -= popcount(pieces[p]) * piece_values[p];
-    }
-    
-    // Apply side-to-move bonus (tempo)
-    if (side_to_move == WHITE) {
-        score += 10; // Small bonus for having the move
-    } else {
-        score -= 10;
-    }
-    
-    return score;
+    return NNUE::evaluate(*this);
 }
 
 // ==================== MAIN FUNCTION ====================
