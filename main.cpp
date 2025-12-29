@@ -1576,7 +1576,9 @@ public:
                 break;
             }
             
-            auto [current_best, current_score] = find_best_move(pos, depth);
+            auto result = find_best_move(pos, depth);
+            Move current_best = result.first;
+            int current_score = result.second;
             
             // Output search info
             std::cout << "info depth " << depth
