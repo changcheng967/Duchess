@@ -1,0 +1,30 @@
+# --- Visual Studio Artifacts ---
+.vs/
+
+x64/
+Debug/
+Release/
+*.obj
+*.log
+*.tlog
+*.lastbuildstate
+*.idb
+*.pdb
+*.ilk
+*.exe
+*.recipe
+
+# --- User-Specific Project Files ---
+*.vcxproj.user
+*.suo
+*.opensdf
+*.sdf
+
+# --- Engine Specifics ---
+# You likely want to track your .nnue file if it's your primary weights file,
+# but if you have many large experimental networks, uncomment the line below:
+*.nnue
+
+# --- Backup/Temporary Files ---
+*.bak
+*.tmp
