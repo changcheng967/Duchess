@@ -920,7 +920,7 @@ namespace NNUE {
     
     // NNUE file header structure
     struct NNUEHeader {
-        uint32_t magic;           // "nnue" magic bytes
+        uint32_t magic;           // Magic number
         uint32_t version;         // Version
         uint32_t input_type;      // Input type
         uint32_t feature_transformer_offset;
@@ -943,22 +943,31 @@ namespace NNUE {
         NNUEHeader header;
         file.read(reinterpret_cast<char*>(&header), sizeof(header));
         
-        // Check magic number (should be "nnue" in little-endian)
-        if (header.magic != 0x65756E6E) {
-            std::cerr << "Invalid NNUE file format: bad magic number" << std::endl;
+        // Check magic number (actual magic from the file)
+        if (header.magic != 0x7af32f20) {
+            std::cerr << "Invalid NNUE file format: bad magic number (got: 0x"
+                      << std::hex << header.magic << std::dec << ")" << std::endl;
             file.close();
             return false;
         }
         
-        // Validate sizes
+        std::cout << "NNUE header: magic=0x" << std::hex << header.magic
+                  << " version=0x" << header.version
+                  << " input_type=0x" << header.input_type << std::dec << std::endl;
+        
+        // Validate sizes for HalfKAv2
         if (header.feature_transformer_size != INPUT_SIZE * HIDDEN_SIZE * sizeof(int16_t)) {
-            std::cerr << "Invalid NNUE file: wrong input weights size" << std::endl;
+            std::cerr << "Invalid NNUE file: wrong input weights size (expected: "
+                      << INPUT_SIZE * HIDDEN_SIZE * sizeof(int16_t)
+                      << ", got: " << header.feature_transformer_size << ")" << std::endl;
             file.close();
             return false;
         }
         
         if (header.hidden_layer_size != HIDDEN_SIZE * OUTPUT_SIZE * sizeof(int16_t)) {
-            std::cerr << "Invalid NNUE file: wrong hidden weights size" << std::endl;
+            std::cerr << "Invalid NNUE file: wrong hidden weights size (expected: "
+                      << HIDDEN_SIZE * OUTPUT_SIZE * sizeof(int16_t)
+                      << ", got: " << header.hidden_layer_size << ")" << std::endl;
             file.close();
             return false;
         }
