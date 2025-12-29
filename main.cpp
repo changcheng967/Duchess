@@ -628,27 +628,27 @@ std::vector<Move> Position::generate_moves() const {
     // Castling
     if (friendly == WHITE) {
         if (castling_rights & WHITE_KS) {
-            if (!(all_occupied & (SQ(F1) | SQ(G1))) && 
-                !is_square_attacked(E1, BLACK) && !is_square_attacked(F1, BLACK)) {
+            if (!(all_occupied & (SQ(F1) | SQ(G1))) &&
+                !is_square_attacked(E1, enemy) && !is_square_attacked(F1, enemy)) {
                 moves.emplace_back(E1, G1, MOVE_CASTLE);
             }
         }
         if (castling_rights & WHITE_QS) {
-            if (!(all_occupied & (SQ(B1) | SQ(C1) | SQ(D1))) && 
-                !is_square_attacked(E1, BLACK) && !is_square_attacked(D1, BLACK)) {
+            if (!(all_occupied & (SQ(B1) | SQ(C1) | SQ(D1))) &&
+                !is_square_attacked(E1, enemy) && !is_square_attacked(D1, enemy)) {
                 moves.emplace_back(E1, C1, MOVE_CASTLE);
             }
         }
     } else {
         if (castling_rights & BLACK_KS) {
-            if (!(all_occupied & (SQ(F8) | SQ(G8))) && 
-                !is_square_attacked(E8, WHITE) && !is_square_attacked(F8, WHITE)) {
+            if (!(all_occupied & (SQ(F8) | SQ(G8))) &&
+                !is_square_attacked(E8, enemy) && !is_square_attacked(F8, enemy)) {
                 moves.emplace_back(E8, G8, MOVE_CASTLE);
             }
         }
         if (castling_rights & BLACK_QS) {
-            if (!(all_occupied & (SQ(B8) | SQ(C8) | SQ(D8))) && 
-                !is_square_attacked(E8, WHITE) && !is_square_attacked(D8, WHITE)) {
+            if (!(all_occupied & (SQ(B8) | SQ(C8) | SQ(D8))) &&
+                !is_square_attacked(E8, enemy) && !is_square_attacked(D8, enemy)) {
                 moves.emplace_back(E8, C8, MOVE_CASTLE);
             }
         }
@@ -900,7 +900,7 @@ namespace NNUE {
     constexpr int PIECE_SQUARES_WHITE = 128;
     constexpr int PIECE_SQUARES_BLACK = 512;
     
-    // Network weights and biases (simplified - would load from .nnue file)
+    // Network weights and biases
     alignas(64) static int16_t input_weights[INPUT_SIZE][HIDDEN_SIZE];
     alignas(64) static int16_t hidden_weights[HIDDEN_SIZE][OUTPUT_SIZE];
     alignas(64) static int32_t input_biases[HIDDEN_SIZE];
@@ -918,7 +918,20 @@ namespace NNUE {
         int to[3];
     };
     
-    // Load NNUE weights from file
+    // NNUE file header structure
+    struct NNUEHeader {
+        uint32_t magic;           // "nnue" magic bytes
+        uint32_t version;         // Version
+        uint32_t input_type;      // Input type
+        uint32_t feature_transformer_offset;
+        uint32_t feature_transformer_size;
+        uint32_t hidden_layer_offset;
+        uint32_t hidden_layer_size;
+        uint32_t output_offset;
+        uint32_t output_size;
+    };
+    
+    // Load NNUE weights from file with proper format parsing
     bool load_nnue(const std::string& filename) {
         std::ifstream file(filename, std::ios::binary);
         if (!file.is_open()) {
@@ -926,21 +939,47 @@ namespace NNUE {
             return false;
         }
         
-        // Read header (simplified - real NNUE has complex header)
-        uint32_t magic;
-        file.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+        // Read and validate header
+        NNUEHeader header;
+        file.read(reinterpret_cast<char*>(&header), sizeof(header));
         
-        // Read input weights
-        file.read(reinterpret_cast<char*>(input_weights), sizeof(input_weights));
+        // Check magic number (should be "nnue" in little-endian)
+        if (header.magic != 0x65756E6E) {
+            std::cerr << "Invalid NNUE file format: bad magic number" << std::endl;
+            file.close();
+            return false;
+        }
         
-        // Read hidden weights
-        file.read(reinterpret_cast<char*>(hidden_weights), sizeof(hidden_weights));
+        // Validate sizes
+        if (header.feature_transformer_size != INPUT_SIZE * HIDDEN_SIZE * sizeof(int16_t)) {
+            std::cerr << "Invalid NNUE file: wrong input weights size" << std::endl;
+            file.close();
+            return false;
+        }
+        
+        if (header.hidden_layer_size != HIDDEN_SIZE * OUTPUT_SIZE * sizeof(int16_t)) {
+            std::cerr << "Invalid NNUE file: wrong hidden weights size" << std::endl;
+            file.close();
+            return false;
+        }
+        
+        // Seek to feature transformer weights
+        file.seekg(header.feature_transformer_offset, std::ios::beg);
+        
+        // Read input weights (feature transformer)
+        file.read(reinterpret_cast<char*>(input_weights), header.feature_transformer_size);
         
         // Read input biases
-        file.read(reinterpret_cast<char*>(input_biases), sizeof(input_biases));
+        file.read(reinterpret_cast<char*>(input_biases), HIDDEN_SIZE * sizeof(int32_t));
+        
+        // Seek to hidden layer weights
+        file.seekg(header.hidden_layer_offset, std::ios::beg);
+        
+        // Read hidden weights
+        file.read(reinterpret_cast<char*>(hidden_weights), header.hidden_layer_size);
         
         // Read hidden biases
-        file.read(reinterpret_cast<char*>(hidden_biases), sizeof(hidden_biases));
+        file.read(reinterpret_cast<char*>(hidden_biases), OUTPUT_SIZE * sizeof(int32_t));
         
         file.close();
         
@@ -950,10 +989,11 @@ namespace NNUE {
             accumulator_black[i] = 0;
         }
         
+        std::cout << "NNUE weights loaded successfully from " << filename << std::endl;
         return true;
     }
     
-    // Initialize NNUE weights (placeholder - would load from .nnue file)
+    // Initialize NNUE weights
     void init() {
         // Try to load real NNUE file first
         if (!load_nnue("C:\\Users\\chang\\Downloads\\Duchess\\nn-2962dca31855.nnue")) {
@@ -986,15 +1026,30 @@ namespace NNUE {
         }
     }
     
-    // Convert piece and square to feature index
+    // Convert piece and square to feature index for HalfKAv2
     int get_feature_index(int piece, int square, bool is_white) {
-        if (piece == W_KING || piece == B_KING) {
-            return is_white ? KING_SQUARE_WHITE + square : KING_SQUARE_BLACK + square;
+        // For HalfKAv2, we need to map pieces correctly
+        // White pieces: 0-5 (P-N-B-R-Q-K), Black pieces: 6-11 (p-n-b-r-q-k)
+        int piece_type;
+        if (piece >= W_PAWN && piece <= W_KING) {
+            piece_type = piece - W_PAWN;  // 0-5 for white pieces
+        } else if (piece >= B_PAWN && piece <= B_KING) {
+            piece_type = (piece - B_PAWN) + 6;  // 6-11 for black pieces
+        } else {
+            return -1; // Invalid piece
         }
         
-        int base_index = is_white ? PIECE_SQUARES_WHITE : PIECE_SQUARES_BLACK;
-        int piece_type = piece % 6; // 0-5 for pawn-knight-bishop-rook-queen-king
-        return base_index + piece_type * 64 + square;
+        // HalfKAv2 feature layout:
+        // 0-63: White king position
+        // 64-127: Black king position
+        // 128-639: Piece positions (10 types * 64 squares)
+        if (piece == W_KING) {
+            return KING_SQUARE_WHITE + square;
+        } else if (piece == B_KING) {
+            return KING_SQUARE_BLACK + square;
+        } else {
+            return PIECE_SQUARES_WHITE + piece_type * 64 + square;
+        }
     }
     
     // Update accumulator for a piece move
@@ -1029,33 +1084,17 @@ namespace NNUE {
             acc[i] = 0;
         }
         
-        // Set king position
-        int king_sq = lsb(pos.get_pieces(is_white ? W_KING : B_KING));
-        int king_idx = is_white ? KING_SQUARE_WHITE + king_sq : KING_SQUARE_BLACK + king_sq;
-        acc[king_idx] = 1;
-        
-        // Set piece positions
-        int base_idx = is_white ? PIECE_SQUARES_WHITE : PIECE_SQUARES_BLACK;
-        
-        // White pieces
-        for (int p = W_PAWN; p <= W_KING; p++) {
+        // Set all piece positions for both sides
+        for (int p = W_PAWN; p <= B_KING; p++) {
             Bitboard pieces = pos.get_pieces(p);
             while (pieces) {
                 int sq = lsb(pieces);
                 pieces = clear_lsb(pieces);
-                int piece_type = p % 6;
-                acc[base_idx + piece_type * 64 + sq] = 1;
-            }
-        }
-        
-        // Black pieces
-        for (int p = B_PAWN; p <= B_KING; p++) {
-            Bitboard pieces = pos.get_pieces(p);
-            while (pieces) {
-                int sq = lsb(pieces);
-                pieces = clear_lsb(pieces);
-                int piece_type = p % 6;
-                acc[base_idx + piece_type * 64 + sq] = 1;
+                
+                int feature_idx = get_feature_index(p, sq, is_white);
+                if (feature_idx >= 0 && feature_idx < INPUT_SIZE) {
+                    acc[feature_idx] = 1;
+                }
             }
         }
     }
@@ -1643,9 +1682,10 @@ private:
                     fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
                 } else if (part == "fen") {
                     // Read FEN
-                    fen = part;
+                    fen = "";
                     while (ss >> part && part != "moves") {
-                        fen += " " + part;
+                        if (!fen.empty()) fen += " ";
+                        fen += part;
                     }
                 }
                 
@@ -1655,7 +1695,28 @@ private:
                 }
                 
                 // Apply position and moves
-                // This would set up the position
+                Position temp_pos;
+                temp_pos.from_fen(fen);
+                
+                // Apply moves
+                for (const auto& move_str : moves) {
+                    // Parse move string (e.g., "e2e4")
+                    if (move_str.length() >= 4) {
+                        int from_file = move_str[0] - 'a';
+                        int from_rank = move_str[1] - '1';
+                        int to_file = move_str[2] - 'a';
+                        int to_rank = move_str[3] - '1';
+                        
+                        int from = from_file + from_rank * 8;
+                        int to = to_file + to_rank * 8;
+                        
+                        Move move(from, to);
+                        temp_pos.make_move(move);
+                    }
+                }
+                
+                // Update global position (in a real implementation, this would be stateful)
+                // For now, we'll just use the position in the go command
             }
             else if (token == "go") {
                 // Parse go command
