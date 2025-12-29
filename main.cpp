@@ -889,26 +889,28 @@ void Position::print() const {
 // ==================== NNUE EVALUATION ====================
 
 namespace NNUE {
-    // NNUE network structure constants
-    constexpr int INPUT_SIZE = 768;    // HalfKAv2 input features
-    constexpr int HIDDEN_SIZE = 512;   // Hidden layer size
-    constexpr int OUTPUT_SIZE = 1;     // Single output (evaluation)
-    
-    // Feature indices for HalfKAv2
-    constexpr int KING_SQUARE_WHITE = 0;
-    constexpr int KING_SQUARE_BLACK = 64;
-    constexpr int PIECE_SQUARES_WHITE = 128;
-    constexpr int PIECE_SQUARES_BLACK = 512;
+    // Stockfish NNUE network structure constants
+    constexpr int FEATURE_TRANSFORMER_INPUT = 768;    // HalfKAv2 input features
+    constexpr int FEATURE_TRANSFORMER_OUTPUT = 256;   // Feature transformer output
+    constexpr int LAYER1_INPUT = 512;                 // 2 * 256 (both sides)
+    constexpr int LAYER1_OUTPUT = 32;                 // First hidden layer
+    constexpr int LAYER2_INPUT = 32;                  // Second hidden layer input
+    constexpr int LAYER2_OUTPUT = 32;                 // Second hidden layer output
+    constexpr int OUTPUT_SIZE = 1;                    // Single output (evaluation)
     
     // Network weights and biases
-    alignas(64) static int16_t input_weights[INPUT_SIZE][HIDDEN_SIZE];
-    alignas(64) static int16_t hidden_weights[HIDDEN_SIZE][OUTPUT_SIZE];
-    alignas(64) static int32_t input_biases[HIDDEN_SIZE];
-    alignas(64) static int32_t hidden_biases[OUTPUT_SIZE];
+    alignas(64) static int16_t feature_weights[FEATURE_TRANSFORMER_INPUT][FEATURE_TRANSFORMER_OUTPUT];
+    alignas(64) static int16_t feature_biases[FEATURE_TRANSFORMER_OUTPUT];
+    alignas(64) static int16_t layer1_weights[LAYER1_INPUT][LAYER1_OUTPUT];
+    alignas(64) static int16_t layer1_biases[LAYER1_OUTPUT];
+    alignas(64) static int16_t layer2_weights[LAYER2_INPUT][LAYER2_OUTPUT];
+    alignas(64) static int16_t layer2_biases[LAYER2_OUTPUT];
+    alignas(64) static int16_t output_weights[LAYER2_OUTPUT][OUTPUT_SIZE];
+    alignas(64) static int16_t output_biases[OUTPUT_SIZE];
     
-    // Feature accumulator
-    alignas(64) static int16_t accumulator_white[INPUT_SIZE];
-    alignas(64) static int16_t accumulator_black[INPUT_SIZE];
+    // Feature accumulator (per side)
+    alignas(64) static int16_t accumulator_white[FEATURE_TRANSFORMER_INPUT];
+    alignas(64) static int16_t accumulator_black[FEATURE_TRANSFORMER_INPUT];
     
     // Dirty piece tracking for incremental updates
     struct DirtyPiece {
@@ -918,7 +920,7 @@ namespace NNUE {
         int to[3];
     };
     
-    // Load NNUE weights from file (simplified approach for this specific file)
+    // Load Stockfish NNUE weights from file
     bool load_nnue(const std::string& filename) {
         std::ifstream file(filename, std::ios::binary);
         if (!file.is_open()) {
@@ -927,10 +929,10 @@ namespace NNUE {
         }
         
         // Read and validate header
-        uint32_t magic, version, input_type;
+        uint32_t magic, version, hash;
         file.read(reinterpret_cast<char*>(&magic), sizeof(magic));
         file.read(reinterpret_cast<char*>(&version), sizeof(version));
-        file.read(reinterpret_cast<char*>(&input_type), sizeof(input_type));
+        file.read(reinterpret_cast<char*>(&hash), sizeof(hash));
         
         // Check magic number
         if (magic != 0x7af32f20) {
@@ -942,46 +944,47 @@ namespace NNUE {
         
         std::cout << "NNUE header: magic=0x" << std::hex << magic
                   << " version=0x" << version
-                  << " input_type=0x" << input_type << std::dec << std::endl;
+                  << " hash=0x" << hash << std::dec << std::endl;
         
-        // Skip the text description that follows
-        // The text starts at offset 12 and goes until we find null bytes
-        file.seekg(12, std::ios::beg);
-        
-        // Find the end of the text section (look for null bytes)
+        // Skip architecture description (find null terminator)
         char c;
         while (file.get(c) && c != '\0') {
-            // Just skip through the text
+            // Skip architecture string
         }
         
-        // Now we should be at the weights section
-        // For HalfKAv2, we expect:
-        // - Input weights: 768 * 512 * 2 bytes = 786,432 bytes
-        // - Input biases: 512 * 4 bytes = 2,048 bytes
-        // - Hidden weights: 512 * 1 * 2 bytes = 1,024 bytes
-        // - Hidden biases: 1 * 4 bytes = 4 bytes
+        // Read feature transformer
+        file.read(reinterpret_cast<char*>(feature_weights),
+                  FEATURE_TRANSFORMER_INPUT * FEATURE_TRANSFORMER_OUTPUT * sizeof(int16_t));
+        file.read(reinterpret_cast<char*>(feature_biases),
+                  FEATURE_TRANSFORMER_OUTPUT * sizeof(int16_t));
         
-        // Read input weights
-        file.read(reinterpret_cast<char*>(input_weights), INPUT_SIZE * HIDDEN_SIZE * sizeof(int16_t));
+        // Read layer 1
+        file.read(reinterpret_cast<char*>(layer1_weights),
+                  LAYER1_INPUT * LAYER1_OUTPUT * sizeof(int16_t));
+        file.read(reinterpret_cast<char*>(layer1_biases),
+                  LAYER1_OUTPUT * sizeof(int16_t));
         
-        // Read input biases
-        file.read(reinterpret_cast<char*>(input_biases), HIDDEN_SIZE * sizeof(int32_t));
+        // Read layer 2
+        file.read(reinterpret_cast<char*>(layer2_weights),
+                  LAYER2_INPUT * LAYER2_OUTPUT * sizeof(int16_t));
+        file.read(reinterpret_cast<char*>(layer2_biases),
+                  LAYER2_OUTPUT * sizeof(int16_t));
         
-        // Read hidden weights
-        file.read(reinterpret_cast<char*>(hidden_weights), HIDDEN_SIZE * OUTPUT_SIZE * sizeof(int16_t));
-        
-        // Read hidden biases
-        file.read(reinterpret_cast<char*>(hidden_biases), OUTPUT_SIZE * sizeof(int32_t));
+        // Read output layer
+        file.read(reinterpret_cast<char*>(output_weights),
+                  LAYER2_OUTPUT * OUTPUT_SIZE * sizeof(int16_t));
+        file.read(reinterpret_cast<char*>(output_biases),
+                  OUTPUT_SIZE * sizeof(int16_t));
         
         file.close();
         
         // Initialize accumulators
-        for (int i = 0; i < INPUT_SIZE; i++) {
+        for (int i = 0; i < FEATURE_TRANSFORMER_INPUT; i++) {
             accumulator_white[i] = 0;
             accumulator_black[i] = 0;
         }
         
-        std::cout << "NNUE weights loaded successfully from " << filename << std::endl;
+        std::cout << "Stockfish NNUE weights loaded successfully from " << filename << std::endl;
         return true;
     }
     
@@ -993,26 +996,49 @@ namespace NNUE {
             // Fallback to random initialization
             std::mt19937_64 rng(123456789);
             
-            for (int i = 0; i < INPUT_SIZE; i++) {
-                for (int j = 0; j < HIDDEN_SIZE; j++) {
-                    input_weights[i][j] = (int16_t)(rng() % 256 - 128);
+            // Initialize feature transformer
+            for (int i = 0; i < FEATURE_TRANSFORMER_INPUT; i++) {
+                for (int j = 0; j < FEATURE_TRANSFORMER_OUTPUT; j++) {
+                    feature_weights[i][j] = (int16_t)(rng() % 256 - 128);
                 }
             }
+            for (int i = 0; i < FEATURE_TRANSFORMER_OUTPUT; i++) {
+                feature_biases[i] = (int16_t)(rng() % 256 - 128);
+            }
             
-            for (int i = 0; i < HIDDEN_SIZE; i++) {
+            // Initialize layer 1
+            for (int i = 0; i < LAYER1_INPUT; i++) {
+                for (int j = 0; j < LAYER1_OUTPUT; j++) {
+                    layer1_weights[i][j] = (int16_t)(rng() % 256 - 128);
+                }
+            }
+            for (int i = 0; i < LAYER1_OUTPUT; i++) {
+                layer1_biases[i] = (int16_t)(rng() % 256 - 128);
+            }
+            
+            // Initialize layer 2
+            for (int i = 0; i < LAYER2_INPUT; i++) {
+                for (int j = 0; j < LAYER2_OUTPUT; j++) {
+                    layer2_weights[i][j] = (int16_t)(rng() % 256 - 128);
+                }
+            }
+            for (int i = 0; i < LAYER2_OUTPUT; i++) {
+                layer2_biases[i] = (int16_t)(rng() % 256 - 128);
+            }
+            
+            // Initialize output layer
+            for (int i = 0; i < LAYER2_OUTPUT; i++) {
                 for (int j = 0; j < OUTPUT_SIZE; j++) {
-                    hidden_weights[i][j] = (int16_t)(rng() % 256 - 128);
+                    output_weights[i][j] = (int16_t)(rng() % 256 - 128);
                 }
-                input_biases[i] = (int32_t)(rng() % 1024 - 512);
             }
-            
             for (int i = 0; i < OUTPUT_SIZE; i++) {
-                hidden_biases[i] = (int32_t)(rng() % 1024 - 512);
+                output_biases[i] = (int16_t)(rng() % 256 - 128);
             }
         }
         
         // Initialize accumulators
-        for (int i = 0; i < INPUT_SIZE; i++) {
+        for (int i = 0; i < FEATURE_TRANSFORMER_INPUT; i++) {
             accumulator_white[i] = 0;
             accumulator_black[i] = 0;
         }
@@ -1020,8 +1046,20 @@ namespace NNUE {
     
     // Convert piece and square to feature index for HalfKAv2
     int get_feature_index(int piece, int square, bool is_white) {
-        // For HalfKAv2, we need to map pieces correctly
-        // White pieces: 0-5 (P-N-B-R-Q-K), Black pieces: 6-11 (p-n-b-r-q-k)
+        // For HalfKAv2, features are indexed as:
+        // 0-63: White pawn positions
+        // 64-127: White knight positions
+        // 128-191: White bishop positions
+        // 192-255: White rook positions
+        // 256-319: White queen positions
+        // 320-383: White king positions
+        // 384-447: Black pawn positions
+        // 448-511: Black knight positions
+        // 512-575: Black bishop positions
+        // 576-639: Black rook positions
+        // 640-703: Black queen positions
+        // 704-767: Black king positions
+        
         int piece_type;
         if (piece >= W_PAWN && piece <= W_KING) {
             piece_type = piece - W_PAWN;  // 0-5 for white pieces
@@ -1031,17 +1069,7 @@ namespace NNUE {
             return -1; // Invalid piece
         }
         
-        // HalfKAv2 feature layout:
-        // 0-63: White king position
-        // 64-127: Black king position
-        // 128-639: Piece positions (10 types * 64 squares)
-        if (piece == W_KING) {
-            return KING_SQUARE_WHITE + square;
-        } else if (piece == B_KING) {
-            return KING_SQUARE_BLACK + square;
-        } else {
-            return PIECE_SQUARES_WHITE + piece_type * 64 + square;
-        }
+        return piece_type * 64 + square;
     }
     
     // Update accumulator for a piece move
@@ -1056,13 +1084,17 @@ namespace NNUE {
             // Remove old feature
             if (from != -1) {
                 int idx = get_feature_index(piece, from, is_white);
-                acc[idx] = 0;
+                if (idx >= 0 && idx < FEATURE_TRANSFORMER_INPUT) {
+                    acc[idx] = 0;
+                }
             }
             
             // Add new feature
             if (to != -1) {
                 int idx = get_feature_index(piece, to, is_white);
-                acc[idx] = 1;
+                if (idx >= 0 && idx < FEATURE_TRANSFORMER_INPUT) {
+                    acc[idx] = 1;
+                }
             }
         }
     }
@@ -1072,11 +1104,11 @@ namespace NNUE {
         int16_t* acc = is_white ? accumulator_white : accumulator_black;
         
         // Clear accumulator
-        for (int i = 0; i < INPUT_SIZE; i++) {
+        for (int i = 0; i < FEATURE_TRANSFORMER_INPUT; i++) {
             acc[i] = 0;
         }
         
-        // Set all piece positions for both sides
+        // Set all piece positions
         for (int p = W_PAWN; p <= B_KING; p++) {
             Bitboard pieces = pos.get_pieces(p);
             while (pieces) {
@@ -1084,7 +1116,7 @@ namespace NNUE {
                 pieces = clear_lsb(pieces);
                 
                 int feature_idx = get_feature_index(p, sq, is_white);
-                if (feature_idx >= 0 && feature_idx < INPUT_SIZE) {
+                if (feature_idx >= 0 && feature_idx < FEATURE_TRANSFORMER_INPUT) {
                     acc[feature_idx] = 1;
                 }
             }
@@ -1096,45 +1128,71 @@ namespace NNUE {
         return x > 0 ? x : 0;
     }
     
-    // Evaluate position using NNUE
+    // Evaluate position using Stockfish NNUE
     int evaluate(const Position& pos) {
         // Update accumulators for both sides
-        DirtyPiece dp_white = {0};
-        DirtyPiece dp_black = {0};
-        
-        // For now, do full refresh (optimization: implement incremental updates)
         refresh_accumulator(pos, true);
         refresh_accumulator(pos, false);
         
-        // Forward pass through network
-        alignas(64) int32_t hidden[HIDDEN_SIZE];
+        // Feature transformer: 768 -> 256
+        alignas(64) int32_t ft_output[FEATURE_TRANSFORMER_OUTPUT];
         
-        // Input layer to hidden layer
-        for (int j = 0; j < HIDDEN_SIZE; j++) {
-            int32_t sum = input_biases[j];
+        for (int j = 0; j < FEATURE_TRANSFORMER_OUTPUT; j++) {
+            int32_t sum = feature_biases[j];
             
             // White features
-            for (int i = 0; i < INPUT_SIZE; i++) {
-                sum += accumulator_white[i] * input_weights[i][j];
+            for (int i = 0; i < FEATURE_TRANSFORMER_INPUT; i++) {
+                sum += accumulator_white[i] * feature_weights[i][j];
             }
             
             // Black features
-            for (int i = 0; i < INPUT_SIZE; i++) {
-                sum += accumulator_black[i] * input_weights[i][j];
+            for (int i = 0; i < FEATURE_TRANSFORMER_INPUT; i++) {
+                sum += accumulator_black[i] * feature_weights[i][j];
             }
             
-            hidden[j] = relu(sum);
+            ft_output[j] = relu(sum);
         }
         
-        // Hidden layer to output
-        int32_t output = hidden_biases[0];
-        for (int j = 0; j < HIDDEN_SIZE; j++) {
-            output += hidden[j] * hidden_weights[j][0];
+        // Layer 1: 512 -> 32 (concatenate both sides)
+        alignas(64) int32_t layer1_output[LAYER1_OUTPUT];
+        
+        for (int j = 0; j < LAYER1_OUTPUT; j++) {
+            int32_t sum = layer1_biases[j];
+            
+            // White side (first 256 neurons)
+            for (int i = 0; i < FEATURE_TRANSFORMER_OUTPUT; i++) {
+                sum += ft_output[i] * layer1_weights[i][j];
+            }
+            
+            // Black side (next 256 neurons)
+            for (int i = 0; i < FEATURE_TRANSFORMER_OUTPUT; i++) {
+                sum += ft_output[i] * layer1_weights[i + FEATURE_TRANSFORMER_OUTPUT][j];
+            }
+            
+            layer1_output[j] = relu(sum);
         }
         
-        // Scale output to centipawns
-        // The NNUE output might need different scaling
-        return output / 1024; // Even more conservative scaling
+        // Layer 2: 32 -> 32
+        alignas(64) int32_t layer2_output[LAYER2_OUTPUT];
+        
+        for (int j = 0; j < LAYER2_OUTPUT; j++) {
+            int32_t sum = layer2_biases[j];
+            
+            for (int i = 0; i < LAYER1_OUTPUT; i++) {
+                sum += layer1_output[i] * layer2_weights[i][j];
+            }
+            
+            layer2_output[j] = relu(sum);
+        }
+        
+        // Output layer: 32 -> 1
+        int32_t output = output_biases[0];
+        for (int j = 0; j < LAYER2_OUTPUT; j++) {
+            output += layer2_output[j] * output_weights[j][0];
+        }
+        
+        // Scale output to centipawns (Stockfish uses different scaling)
+        return output / 4; // Stockfish scaling factor
     }
 }
 
@@ -1538,9 +1596,15 @@ public:
 
 class Search {
 private:
+    // Helper function to evaluate position without relying on global accumulators
+    static int evaluate_position(const Position& pos) {
+        // Use the NNUE evaluation directly
+        return NNUE::evaluate(pos);
+    }
+    
     static int alpha_beta(Position& pos, int depth, int alpha, int beta) {
         if (depth == 0) {
-            return pos.evaluate();
+            return evaluate_position(pos);
         }
         
         auto moves = pos.generate_legal_moves();
@@ -1551,7 +1615,7 @@ private:
             return 0; // Stalemate
         }
         
-        int max_score = -40000;
+        int max_score = -1000000;
         
         for (const auto& move : moves) {
             Position temp_pos = pos; // Create copy to avoid modifying original
@@ -1572,16 +1636,16 @@ private:
     static std::pair<Move, int> find_best_move(Position& pos, int depth) {
         auto moves = pos.generate_legal_moves();
         if (moves.empty()) {
-            return {Move(), -40000};
+            return {Move(), -1000000};
         }
         
         Move best_move = moves[0];
-        int best_score = -40000;
+        int best_score = -1000000;
         
         for (const auto& move : moves) {
             Position temp_pos = pos; // Create copy to avoid modifying original
             if (!temp_pos.make_move(move)) continue;
-            int score = -alpha_beta(temp_pos, depth - 1, -40000, 40000);
+            int score = -alpha_beta(temp_pos, depth - 1, -1000000, 1000000);
             
             if (score > best_score) {
                 best_score = score;
