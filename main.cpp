@@ -1124,7 +1124,7 @@ bool Position::make_move(const Move& move) {
     
     if (piece == -1) return false; // No piece to move
     
-    int color = (piece < 6) ? WHITE : BLACK;
+    int color = (piece <= 6) ? WHITE : BLACK;
     int enemy = 1 - color;
     
     // Store undo information
@@ -1169,7 +1169,7 @@ bool Position::make_move(const Move& move) {
         if (move.is_enpassant()) {
             // En passant capture
             int ep_target = to + (color == WHITE ? SOUTH : NORTH);
-            for (int p = 0; p < 12; p++) {
+            for (int p = 1; p <= 12; p++) {
                 if (pieces[p] & SQ(ep_target)) {
                     captured = p;
                     update_hash_remove(captured, ep_target);
@@ -1181,7 +1181,7 @@ bool Position::make_move(const Move& move) {
             }
         } else {
             // Normal capture
-            for (int p = 0; p < 12; p++) {
+            for (int p = 1; p <= 12; p++) {
                 if (pieces[p] & SQ(to)) {
                     captured = p;
                     update_hash_remove(captured, to);
@@ -1306,7 +1306,7 @@ void Position::undo_move(const Move& move) {
     
     if (piece == -1) return; // No piece to undo
     
-    int color = (piece < 6) ? WHITE : BLACK;
+    int color = (piece <= 6) ? WHITE : BLACK;
     int enemy = 1 - color;
     
     // Restore hash
@@ -1364,11 +1364,11 @@ void Position::undo_move(const Move& move) {
     if (move.is_promotion()) {
         int pawn = (color == WHITE) ? W_PAWN : B_PAWN;
         
-        // Remove promoted piece
-        pieces[move.promotion()] ^= SQ(to);
+        // Remove promoted piece from 'from' square
+        pieces[move.promotion()] ^= SQ(from);
         
-        // Restore pawn
-        pieces[pawn] ^= SQ(to);
+        // Restore pawn to 'from' square
+        pieces[pawn] ^= SQ(from);
     }
     
     // Restore side to move
@@ -1577,7 +1577,21 @@ public:
             }
             
             Move current_best = find_best_move(pos, depth);
-            int current_score = alpha_beta(pos, depth, -40000, 40000);
+            int current_score = -40000;
+            
+            // Re-calculate score for the best move
+            if (!current_best.data == 0) {
+                auto moves = pos.generate_legal_moves();
+                for (const auto& move : moves) {
+                    if (move == current_best) {
+                        if (pos.make_move(move)) {
+                            current_score = -alpha_beta(pos, depth - 1, -40000, 40000);
+                            pos.undo_move(move);
+                        }
+                        break;
+                    }
+                }
+            }
             
             // Output search info
             std::cout << "info depth " << depth
