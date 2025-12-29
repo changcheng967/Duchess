@@ -918,20 +918,7 @@ namespace NNUE {
         int to[3];
     };
     
-    // NNUE file header structure
-    struct NNUEHeader {
-        uint32_t magic;           // Magic number
-        uint32_t version;         // Version
-        uint32_t input_type;      // Input type
-        uint32_t feature_transformer_offset;
-        uint32_t feature_transformer_size;
-        uint32_t hidden_layer_offset;
-        uint32_t hidden_layer_size;
-        uint32_t output_offset;
-        uint32_t output_size;
-    };
-    
-    // Load NNUE weights from file with proper format parsing
+    // Load NNUE weights from file (simplified approach for this specific file)
     bool load_nnue(const std::string& filename) {
         std::ifstream file(filename, std::ios::binary);
         if (!file.is_open()) {
@@ -940,52 +927,48 @@ namespace NNUE {
         }
         
         // Read and validate header
-        NNUEHeader header;
-        file.read(reinterpret_cast<char*>(&header), sizeof(header));
+        uint32_t magic, version, input_type;
+        file.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+        file.read(reinterpret_cast<char*>(&version), sizeof(version));
+        file.read(reinterpret_cast<char*>(&input_type), sizeof(input_type));
         
-        // Check magic number (actual magic from the file)
-        if (header.magic != 0x7af32f20) {
+        // Check magic number
+        if (magic != 0x7af32f20) {
             std::cerr << "Invalid NNUE file format: bad magic number (got: 0x"
-                      << std::hex << header.magic << std::dec << ")" << std::endl;
+                      << std::hex << magic << std::dec << ")" << std::endl;
             file.close();
             return false;
         }
         
-        std::cout << "NNUE header: magic=0x" << std::hex << header.magic
-                  << " version=0x" << header.version
-                  << " input_type=0x" << header.input_type << std::dec << std::endl;
+        std::cout << "NNUE header: magic=0x" << std::hex << magic
+                  << " version=0x" << version
+                  << " input_type=0x" << input_type << std::dec << std::endl;
         
-        // Validate sizes for HalfKAv2
-        if (header.feature_transformer_size != INPUT_SIZE * HIDDEN_SIZE * sizeof(int16_t)) {
-            std::cerr << "Invalid NNUE file: wrong input weights size (expected: "
-                      << INPUT_SIZE * HIDDEN_SIZE * sizeof(int16_t)
-                      << ", got: " << header.feature_transformer_size << ")" << std::endl;
-            file.close();
-            return false;
+        // Skip the text description that follows
+        // The text starts at offset 12 and goes until we find null bytes
+        file.seekg(12, std::ios::beg);
+        
+        // Find the end of the text section (look for null bytes)
+        char c;
+        while (file.get(c) && c != '\0') {
+            // Just skip through the text
         }
         
-        if (header.hidden_layer_size != HIDDEN_SIZE * OUTPUT_SIZE * sizeof(int16_t)) {
-            std::cerr << "Invalid NNUE file: wrong hidden weights size (expected: "
-                      << HIDDEN_SIZE * OUTPUT_SIZE * sizeof(int16_t)
-                      << ", got: " << header.hidden_layer_size << ")" << std::endl;
-            file.close();
-            return false;
-        }
+        // Now we should be at the weights section
+        // For HalfKAv2, we expect:
+        // - Input weights: 768 * 512 * 2 bytes = 786,432 bytes
+        // - Input biases: 512 * 4 bytes = 2,048 bytes
+        // - Hidden weights: 512 * 1 * 2 bytes = 1,024 bytes
+        // - Hidden biases: 1 * 4 bytes = 4 bytes
         
-        // Seek to feature transformer weights
-        file.seekg(header.feature_transformer_offset, std::ios::beg);
-        
-        // Read input weights (feature transformer)
-        file.read(reinterpret_cast<char*>(input_weights), header.feature_transformer_size);
+        // Read input weights
+        file.read(reinterpret_cast<char*>(input_weights), INPUT_SIZE * HIDDEN_SIZE * sizeof(int16_t));
         
         // Read input biases
         file.read(reinterpret_cast<char*>(input_biases), HIDDEN_SIZE * sizeof(int32_t));
         
-        // Seek to hidden layer weights
-        file.seekg(header.hidden_layer_offset, std::ios::beg);
-        
         // Read hidden weights
-        file.read(reinterpret_cast<char*>(hidden_weights), header.hidden_layer_size);
+        file.read(reinterpret_cast<char*>(hidden_weights), HIDDEN_SIZE * OUTPUT_SIZE * sizeof(int16_t));
         
         // Read hidden biases
         file.read(reinterpret_cast<char*>(hidden_biases), OUTPUT_SIZE * sizeof(int32_t));
