@@ -1139,7 +1139,7 @@ bool Position::make_move(const Move& move) {
         if (move.is_enpassant()) {
             // En passant capture
             int ep_target = to + (color == WHITE ? SOUTH : NORTH);
-            for (int p = 0; p < 12; p++) {
+            for (int p = 1; p <= 12; p++) {
                 if (pieces[p] & SQ(ep_target)) {
                     captured = p;
                     undo.captured_piece = captured;
@@ -1148,7 +1148,7 @@ bool Position::make_move(const Move& move) {
             }
         } else {
             // Normal capture
-            for (int p = 0; p < 12; p++) {
+            for (int p = 1; p <= 12; p++) {
                 if (pieces[p] & SQ(to)) {
                     captured = p;
                     undo.captured_piece = captured;
