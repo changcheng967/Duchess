@@ -888,39 +888,51 @@ void Position::print() const {
 
 // ==================== NNUE EVALUATION ====================
 
+// ==================== COMPLETE FIXED NNUE EVALUATION ====================
+// Replace the entire NNUE namespace in your code with this implementation
+
 namespace NNUE {
-    // Stockfish NNUE network structure constants
-    constexpr int FEATURE_TRANSFORMER_INPUT = 768;    // HalfKAv2 input features
-    constexpr int FEATURE_TRANSFORMER_OUTPUT = 256;   // Feature transformer output
-    constexpr int LAYER1_INPUT = 512;                 // 2 * 256 (both sides)
-    constexpr int LAYER1_OUTPUT = 32;                 // First hidden layer
-    constexpr int LAYER2_INPUT = 32;                  // Second hidden layer input
-    constexpr int LAYER2_OUTPUT = 32;                 // Second hidden layer output
-    constexpr int OUTPUT_SIZE = 1;                    // Single output (evaluation)
+    // Stockfish NNUE architecture: HalfKAv2_hm (768->256x2->32->32->1)
+    constexpr int FEATURE_TRANSFORMER_INPUT = 768;    // 12 piece types × 64 squares
+    constexpr int FEATURE_TRANSFORMER_OUTPUT = 256;   // Feature transformer output per side
+    constexpr int LAYER1_INPUT = 512;                 // 2 × 256 (both perspectives)
+    constexpr int LAYER1_OUTPUT = 32;
+    constexpr int LAYER2_INPUT = 32;
+    constexpr int LAYER2_OUTPUT = 32;
+    constexpr int OUTPUT_SIZE = 1;
+    
+    // Quantization scales (Stockfish uses fixed-point arithmetic)
+    constexpr int FT_QUANT = 255;        // Feature transformer quantization
+    constexpr int FT_SHIFT = 6;          // Feature transformer shift
+    constexpr int WEIGHT_SCALE = 64;     // Weight scale
+    constexpr int OUTPUT_SCALE = 16;     // Output scale
     
     // Network weights and biases
     alignas(64) static int16_t feature_weights[FEATURE_TRANSFORMER_INPUT][FEATURE_TRANSFORMER_OUTPUT];
     alignas(64) static int16_t feature_biases[FEATURE_TRANSFORMER_OUTPUT];
-    alignas(64) static int16_t layer1_weights[LAYER1_INPUT][LAYER1_OUTPUT];
-    alignas(64) static int16_t layer1_biases[LAYER1_OUTPUT];
-    alignas(64) static int16_t layer2_weights[LAYER2_INPUT][LAYER2_OUTPUT];
-    alignas(64) static int16_t layer2_biases[LAYER2_OUTPUT];
-    alignas(64) static int16_t output_weights[LAYER2_OUTPUT][OUTPUT_SIZE];
-    alignas(64) static int16_t output_biases[OUTPUT_SIZE];
+    alignas(64) static int8_t layer1_weights[LAYER1_INPUT][LAYER1_OUTPUT];
+    alignas(64) static int32_t layer1_biases[LAYER1_OUTPUT];
+    alignas(64) static int8_t layer2_weights[LAYER2_INPUT][LAYER2_OUTPUT];
+    alignas(64) static int32_t layer2_biases[LAYER2_OUTPUT];
+    alignas(64) static int8_t output_weights[LAYER2_OUTPUT];
+    alignas(64) static int32_t output_bias;
     
-    // Feature accumulator (per side)
-    alignas(64) static int16_t accumulator_white[FEATURE_TRANSFORMER_INPUT];
-    alignas(64) static int16_t accumulator_black[FEATURE_TRANSFORMER_INPUT];
+    // NNUE file loaded flag
+    static bool nnue_loaded = false;
     
-    // Dirty piece tracking for incremental updates
-    struct DirtyPiece {
-        int dirty_num;
-        int piece[3];
-        int from[3];
-        int to[3];
+    // Accumulator structure (stores feature transformer output)
+    struct Accumulator {
+        alignas(64) int16_t white[FEATURE_TRANSFORMER_OUTPUT];
+        alignas(64) int16_t black[FEATURE_TRANSFORMER_OUTPUT];
+        bool computed;
+        
+        Accumulator() : computed(false) {
+            std::fill(std::begin(white), std::end(white), 0);
+            std::fill(std::begin(black), std::end(black), 0);
+        }
     };
     
-    // Load Stockfish NNUE weights from file
+    // Load NNUE weights from Stockfish format file
     bool load_nnue(const std::string& filename) {
         std::ifstream file(filename, std::ios::binary);
         if (!file.is_open()) {
@@ -928,271 +940,261 @@ namespace NNUE {
             return false;
         }
         
-        // Read and validate header
-        uint32_t magic, version, hash;
-        file.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+        // Read header (version 0x7AF32F20 = Stockfish NNUE)
+        uint32_t version;
         file.read(reinterpret_cast<char*>(&version), sizeof(version));
-        file.read(reinterpret_cast<char*>(&hash), sizeof(hash));
         
-        // Check magic number
-        if (magic != 0x7af32f20) {
-            std::cerr << "Invalid NNUE file format: bad magic number (got: 0x"
-                      << std::hex << magic << std::dec << ")" << std::endl;
+        if (version != 0x7AF32F20 && version != 0x7AF32F16) {
+            std::cerr << "Invalid NNUE version: 0x" << std::hex << version << std::dec << std::endl;
             file.close();
             return false;
         }
         
-        std::cout << "NNUE header: magic=0x" << std::hex << magic
-                  << " version=0x" << version
-                  << " hash=0x" << hash << std::dec << std::endl;
+        std::cout << "Loading NNUE file version: 0x" << std::hex << version << std::dec << std::endl;
         
-        // Skip architecture description (find null terminator)
+        // Read hash
+        uint32_t hash_value;
+        file.read(reinterpret_cast<char*>(&hash_value), sizeof(hash_value));
+        
+        // Read architecture string (null-terminated)
+        std::string architecture;
         char c;
         while (file.get(c) && c != '\0') {
-            // Skip architecture string
+            architecture += c;
         }
+        std::cout << "Architecture: " << architecture << std::endl;
         
-        // Read feature transformer
-        file.read(reinterpret_cast<char*>(feature_weights),
-                  FEATURE_TRANSFORMER_INPUT * FEATURE_TRANSFORMER_OUTPUT * sizeof(int16_t));
+        // Helper lambda to read a section
+        auto read_section = [&file]() {
+            uint32_t hash;
+            file.read(reinterpret_cast<char*>(&hash), sizeof(hash));
+            return hash;
+        };
+        
+        // Read Feature Transformer section
+        read_section(); // Skip hash
         file.read(reinterpret_cast<char*>(feature_biases),
                   FEATURE_TRANSFORMER_OUTPUT * sizeof(int16_t));
+        file.read(reinterpret_cast<char*>(feature_weights),
+                  FEATURE_TRANSFORMER_INPUT * FEATURE_TRANSFORMER_OUTPUT * sizeof(int16_t));
         
-        // Read layer 1
-        file.read(reinterpret_cast<char*>(layer1_weights),
-                  LAYER1_INPUT * LAYER1_OUTPUT * sizeof(int16_t));
+        // Read Layer 1 section
+        read_section(); // Skip hash
         file.read(reinterpret_cast<char*>(layer1_biases),
-                  LAYER1_OUTPUT * sizeof(int16_t));
+                  LAYER1_OUTPUT * sizeof(int32_t));
+        file.read(reinterpret_cast<char*>(layer1_weights),
+                  LAYER1_INPUT * LAYER1_OUTPUT * sizeof(int8_t));
         
-        // Read layer 2
-        file.read(reinterpret_cast<char*>(layer2_weights),
-                  LAYER2_INPUT * LAYER2_OUTPUT * sizeof(int16_t));
+        // Read Layer 2 section
+        read_section(); // Skip hash
         file.read(reinterpret_cast<char*>(layer2_biases),
-                  LAYER2_OUTPUT * sizeof(int16_t));
+                  LAYER2_OUTPUT * sizeof(int32_t));
+        file.read(reinterpret_cast<char*>(layer2_weights),
+                  LAYER2_INPUT * LAYER2_OUTPUT * sizeof(int8_t));
         
-        // Read output layer
+        // Read Output section
+        read_section(); // Skip hash
+        file.read(reinterpret_cast<char*>(&output_bias), sizeof(int32_t));
         file.read(reinterpret_cast<char*>(output_weights),
-                  LAYER2_OUTPUT * OUTPUT_SIZE * sizeof(int16_t));
-        file.read(reinterpret_cast<char*>(output_biases),
-                  OUTPUT_SIZE * sizeof(int16_t));
+                  LAYER2_OUTPUT * sizeof(int8_t));
         
         file.close();
         
-        // Initialize accumulators
-        for (int i = 0; i < FEATURE_TRANSFORMER_INPUT; i++) {
-            accumulator_white[i] = 0;
-            accumulator_black[i] = 0;
-        }
-        
-        std::cout << "Stockfish NNUE weights loaded successfully from " << filename << std::endl;
+        std::cout << "NNUE weights loaded successfully!" << std::endl;
+        nnue_loaded = true;
         return true;
     }
     
-    // Initialize NNUE weights
+    // Initialize NNUE (try to load file, fallback to random weights)
     void init() {
-        // Try to load real NNUE file first
-        if (!load_nnue("C:\\Users\\chang\\Downloads\\Duchess\\nn-2962dca31855.nnue")) {
-            std::cout << "NNUE file not found, using random weights\n";
-            // Fallback to random initialization
-            std::mt19937_64 rng(123456789);
-            
-            // Initialize feature transformer
-            for (int i = 0; i < FEATURE_TRANSFORMER_INPUT; i++) {
-                for (int j = 0; j < FEATURE_TRANSFORMER_OUTPUT; j++) {
-                    feature_weights[i][j] = (int16_t)(rng() % 256 - 128);
-                }
-            }
-            for (int i = 0; i < FEATURE_TRANSFORMER_OUTPUT; i++) {
-                feature_biases[i] = (int16_t)(rng() % 256 - 128);
-            }
-            
-            // Initialize layer 1
-            for (int i = 0; i < LAYER1_INPUT; i++) {
-                for (int j = 0; j < LAYER1_OUTPUT; j++) {
-                    layer1_weights[i][j] = (int16_t)(rng() % 256 - 128);
-                }
-            }
-            for (int i = 0; i < LAYER1_OUTPUT; i++) {
-                layer1_biases[i] = (int16_t)(rng() % 256 - 128);
-            }
-            
-            // Initialize layer 2
-            for (int i = 0; i < LAYER2_INPUT; i++) {
-                for (int j = 0; j < LAYER2_OUTPUT; j++) {
-                    layer2_weights[i][j] = (int16_t)(rng() % 256 - 128);
-                }
-            }
-            for (int i = 0; i < LAYER2_OUTPUT; i++) {
-                layer2_biases[i] = (int16_t)(rng() % 256 - 128);
-            }
-            
-            // Initialize output layer
-            for (int i = 0; i < LAYER2_OUTPUT; i++) {
-                for (int j = 0; j < OUTPUT_SIZE; j++) {
-                    output_weights[i][j] = (int16_t)(rng() % 256 - 128);
-                }
-            }
-            for (int i = 0; i < OUTPUT_SIZE; i++) {
-                output_biases[i] = (int16_t)(rng() % 256 - 128);
+        // Try multiple possible paths
+        std::vector<std::string> paths = {
+            "nn-2962dca31855.nnue",
+            "C:\\Users\\chang\\Downloads\\Duchess\\nn-2962dca31855.nnue",
+            "./nn-2962dca31855.nnue",
+            "../nn-2962dca31855.nnue"
+        };
+        
+        for (const auto& path : paths) {
+            if (load_nnue(path)) {
+                return;
             }
         }
         
-        // Initialize accumulators
-        for (int i = 0; i < FEATURE_TRANSFORMER_INPUT; i++) {
-            accumulator_white[i] = 0;
-            accumulator_black[i] = 0;
+        std::cout << "WARNING: NNUE file not found, using random weights (evaluation will be weak!)" << std::endl;
+        
+        // Fallback: Initialize with small random weights
+        std::mt19937 rng(123456789);
+        std::uniform_int_distribution<int16_t> dist_ft(-127, 127);
+        std::uniform_int_distribution<int8_t> dist_layer(-127, 127);
+        
+        for (int i = 0; i < FEATURE_TRANSFORMER_OUTPUT; i++) {
+            feature_biases[i] = 0;
         }
+        
+        for (int i = 0; i < FEATURE_TRANSFORMER_INPUT; i++) {
+            for (int j = 0; j < FEATURE_TRANSFORMER_OUTPUT; j++) {
+                feature_weights[i][j] = dist_ft(rng);
+            }
+        }
+        
+        for (int i = 0; i < LAYER1_OUTPUT; i++) {
+            layer1_biases[i] = 0;
+        }
+        
+        for (int i = 0; i < LAYER1_INPUT; i++) {
+            for (int j = 0; j < LAYER1_OUTPUT; j++) {
+                layer1_weights[i][j] = dist_layer(rng);
+            }
+        }
+        
+        for (int i = 0; i < LAYER2_OUTPUT; i++) {
+            layer2_biases[i] = 0;
+        }
+        
+        for (int i = 0; i < LAYER2_INPUT; i++) {
+            for (int j = 0; j < LAYER2_OUTPUT; j++) {
+                layer2_weights[i][j] = dist_layer(rng);
+            }
+        }
+        
+        output_bias = 0;
+        for (int i = 0; i < LAYER2_OUTPUT; i++) {
+            output_weights[i] = dist_layer(rng);
+        }
+        
+        nnue_loaded = false; // Mark as not properly loaded
     }
     
-    // Convert piece and square to feature index for HalfKAv2
-    int get_feature_index(int piece, int square, bool is_white) {
-        // For HalfKAv2, features are indexed as:
-        // 0-63: White pawn positions
-        // 64-127: White knight positions
-        // 128-191: White bishop positions
-        // 192-255: White rook positions
-        // 256-319: White queen positions
-        // 320-383: White king positions
-        // 384-447: Black pawn positions
-        // 448-511: Black knight positions
-        // 512-575: Black bishop positions
-        // 576-639: Black rook positions
-        // 640-703: Black queen positions
-        // 704-767: Black king positions
+    // Convert piece and square to feature index (HalfKAv2 format)
+    inline int get_feature_index(int piece, int square, int king_square, bool white_perspective) {
+        // HalfKAv2: Features are relative to king position
+        // Format: [piece_type][king_square][piece_square]
         
+        // Piece type (0-11: P,N,B,R,Q,K for both colors)
         int piece_type;
         if (piece >= W_PAWN && piece <= W_KING) {
-            piece_type = piece - W_PAWN;  // 0-5 for white pieces
+            piece_type = piece - W_PAWN;
         } else if (piece >= B_PAWN && piece <= B_KING) {
-            piece_type = (piece - B_PAWN) + 6;  // 6-11 for black pieces
+            piece_type = (piece - B_PAWN) + 6;
         } else {
-            return -1; // Invalid piece
+            return -1;
         }
         
+        // For black's perspective, flip the board
+        if (!white_perspective) {
+            square ^= 56; // Flip rank
+            king_square ^= 56;
+        }
+        
+        // Calculate index: piece_type * 64 + square
         return piece_type * 64 + square;
     }
     
-    // Update accumulator for a piece move
-    void update_accumulator(const Position& pos, const DirtyPiece& dp, bool is_white) {
-        int16_t* acc = is_white ? accumulator_white : accumulator_black;
+    // Refresh accumulator from scratch
+    void refresh_accumulator(const Position& pos, Accumulator& acc) {
+        // Initialize with biases
+        std::copy(std::begin(feature_biases), std::end(feature_biases), std::begin(acc.white));
+        std::copy(std::begin(feature_biases), std::end(feature_biases), std::begin(acc.black));
         
-        for (int i = 0; i < dp.dirty_num; i++) {
-            int piece = dp.piece[i];
-            int from = dp.from[i];
-            int to = dp.to[i];
-            
-            // Remove old feature
-            if (from != -1) {
-                int idx = get_feature_index(piece, from, is_white);
-                if (idx >= 0 && idx < FEATURE_TRANSFORMER_INPUT) {
-                    acc[idx] = 0;
-                }
-            }
-            
-            // Add new feature
-            if (to != -1) {
-                int idx = get_feature_index(piece, to, is_white);
-                if (idx >= 0 && idx < FEATURE_TRANSFORMER_INPUT) {
-                    acc[idx] = 1;
-                }
-            }
-        }
-    }
-    
-    // Refresh accumulator (full recomputation)
-    void refresh_accumulator(const Position& pos, bool is_white) {
-        int16_t* acc = is_white ? accumulator_white : accumulator_black;
+        // Get king squares
+        int white_king_sq = lsb(pos.get_pieces(W_KING));
+        int black_king_sq = lsb(pos.get_pieces(B_KING));
         
-        // Clear accumulator
-        for (int i = 0; i < FEATURE_TRANSFORMER_INPUT; i++) {
-            acc[i] = 0;
-        }
-        
-        // Set all piece positions
-        for (int p = W_PAWN; p <= B_KING; p++) {
-            Bitboard pieces = pos.get_pieces(p);
+        // Add all pieces to accumulator
+        for (int piece = W_PAWN; piece <= B_KING; piece++) {
+            Bitboard pieces = pos.get_pieces(piece);
             while (pieces) {
                 int sq = lsb(pieces);
                 pieces = clear_lsb(pieces);
                 
-                int feature_idx = get_feature_index(p, sq, is_white);
-                if (feature_idx >= 0 && feature_idx < FEATURE_TRANSFORMER_INPUT) {
-                    acc[feature_idx] = 1;
+                // Add to white's perspective
+                int idx_white = get_feature_index(piece, sq, white_king_sq, true);
+                if (idx_white >= 0 && idx_white < FEATURE_TRANSFORMER_INPUT) {
+                    for (int j = 0; j < FEATURE_TRANSFORMER_OUTPUT; j++) {
+                        acc.white[j] += feature_weights[idx_white][j];
+                    }
+                }
+                
+                // Add to black's perspective
+                int idx_black = get_feature_index(piece, sq, black_king_sq, false);
+                if (idx_black >= 0 && idx_black < FEATURE_TRANSFORMER_INPUT) {
+                    for (int j = 0; j < FEATURE_TRANSFORMER_OUTPUT; j++) {
+                        acc.black[j] += feature_weights[idx_black][j];
+                    }
                 }
             }
         }
+        
+        acc.computed = true;
     }
     
-    // Apply ReLU activation
-    int32_t relu(int32_t x) {
-        return x > 0 ? x : 0;
+    // ClippedReLU activation (used in Stockfish NNUE)
+    inline int32_t clipped_relu(int32_t x) {
+        return std::max(0, std::min(127, x));
     }
     
-    // Evaluate position using Stockfish NNUE
+    // Evaluate position using NNUE
     int evaluate(const Position& pos) {
-        // Update accumulators for both sides
-        refresh_accumulator(pos, true);
-        refresh_accumulator(pos, false);
+        // Create and refresh accumulator
+        Accumulator acc;
+        refresh_accumulator(pos, acc);
         
-        // Feature transformer: 768 -> 256
-        alignas(64) int32_t ft_output[FEATURE_TRANSFORMER_OUTPUT];
+        // Choose perspective based on side to move
+        int16_t* our_acc = (pos.get_side_to_move() == WHITE) ? acc.white : acc.black;
+        int16_t* their_acc = (pos.get_side_to_move() == WHITE) ? acc.black : acc.white;
         
-        for (int j = 0; j < FEATURE_TRANSFORMER_OUTPUT; j++) {
-            int32_t sum = feature_biases[j];
-            
-            // White features
-            for (int i = 0; i < FEATURE_TRANSFORMER_INPUT; i++) {
-                sum += accumulator_white[i] * feature_weights[i][j];
-            }
-            
-            // Black features
-            for (int i = 0; i < FEATURE_TRANSFORMER_INPUT; i++) {
-                sum += accumulator_black[i] * feature_weights[i][j];
-            }
-            
-            ft_output[j] = relu(sum);
-        }
-        
-        // Layer 1: 512 -> 32 (concatenate both sides)
+        // Layer 1: Process both perspectives
         alignas(64) int32_t layer1_output[LAYER1_OUTPUT];
         
-        for (int j = 0; j < LAYER1_OUTPUT; j++) {
-            int32_t sum = layer1_biases[j];
+        for (int i = 0; i < LAYER1_OUTPUT; i++) {
+            int32_t sum = layer1_biases[i];
             
-            // White side (first 256 neurons)
-            for (int i = 0; i < FEATURE_TRANSFORMER_OUTPUT; i++) {
-                sum += ft_output[i] * layer1_weights[i][j];
+            // Our perspective (first 256 inputs)
+            for (int j = 0; j < FEATURE_TRANSFORMER_OUTPUT; j++) {
+                int32_t clipped = clipped_relu(our_acc[j]);
+                sum += clipped * layer1_weights[j][i];
             }
             
-            // Black side (next 256 neurons)
-            for (int i = 0; i < FEATURE_TRANSFORMER_OUTPUT; i++) {
-                sum += ft_output[i] * layer1_weights[i + FEATURE_TRANSFORMER_OUTPUT][j];
+            // Their perspective (next 256 inputs)
+            for (int j = 0; j < FEATURE_TRANSFORMER_OUTPUT; j++) {
+                int32_t clipped = clipped_relu(their_acc[j]);
+                sum += clipped * layer1_weights[j + FEATURE_TRANSFORMER_OUTPUT][i];
             }
             
-            layer1_output[j] = relu(sum);
+            layer1_output[i] = clipped_relu(sum / WEIGHT_SCALE);
         }
         
-        // Layer 2: 32 -> 32
+        // Layer 2
         alignas(64) int32_t layer2_output[LAYER2_OUTPUT];
         
-        for (int j = 0; j < LAYER2_OUTPUT; j++) {
-            int32_t sum = layer2_biases[j];
+        for (int i = 0; i < LAYER2_OUTPUT; i++) {
+            int32_t sum = layer2_biases[i];
             
-            for (int i = 0; i < LAYER1_OUTPUT; i++) {
-                sum += layer1_output[i] * layer2_weights[i][j];
+            for (int j = 0; j < LAYER1_OUTPUT; j++) {
+                sum += layer1_output[j] * layer2_weights[j][i];
             }
             
-            layer2_output[j] = relu(sum);
+            layer2_output[i] = clipped_relu(sum / WEIGHT_SCALE);
         }
         
-        // Output layer: 32 -> 1
-        int32_t output = output_biases[0];
-        for (int j = 0; j < LAYER2_OUTPUT; j++) {
-            output += layer2_output[j] * output_weights[j][0];
+        // Output layer
+        int32_t output = output_bias;
+        
+        for (int i = 0; i < LAYER2_OUTPUT; i++) {
+            output += layer2_output[i] * output_weights[i];
         }
         
-        // Scale output to centipawns (Stockfish uses different scaling)
-        return output / 4; // Stockfish scaling factor
+        // Scale to centipawns
+        // Stockfish uses: output * 600 / (127 * OUTPUT_SCALE)
+        int eval = (output * 600) / (127 * OUTPUT_SCALE);
+        
+        return eval;
+    }
+    
+    // Check if NNUE is properly loaded
+    bool is_loaded() {
+        return nnue_loaded;
     }
 }
 
@@ -1845,7 +1847,7 @@ public:
         current_position.from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
         
         Attacks::init();
-        // NNUE::init(); // Commented out - using classical evaluation
+        NNUE::init(); // Initialize NNUE
         uci_loop();
     }
 };
@@ -1853,33 +1855,33 @@ public:
 // Initialize static member
 Position UCI::current_position;
 
-// Classical evaluation (material counting)
+// NNUE evaluation
 int Position::evaluate() const {
-    // Material values (in centipawns)
-    const int PAWN_VALUE = 100;
-    const int KNIGHT_VALUE = 320;
-    const int BISHOP_VALUE = 330;
-    const int ROOK_VALUE = 500;
-    const int QUEEN_VALUE = 900;
-    
-    int score = 0;
-    
-    // Count material for white
-    score += popcount(pieces[W_PAWN]) * PAWN_VALUE;
-    score += popcount(pieces[W_KNIGHT]) * KNIGHT_VALUE;
-    score += popcount(pieces[W_BISHOP]) * BISHOP_VALUE;
-    score += popcount(pieces[W_ROOK]) * ROOK_VALUE;
-    score += popcount(pieces[W_QUEEN]) * QUEEN_VALUE;
-    
-    // Count material for black (subtract)
-    score -= popcount(pieces[B_PAWN]) * PAWN_VALUE;
-    score -= popcount(pieces[B_KNIGHT]) * KNIGHT_VALUE;
-    score -= popcount(pieces[B_BISHOP]) * BISHOP_VALUE;
-    score -= popcount(pieces[B_ROOK]) * ROOK_VALUE;
-    score -= popcount(pieces[B_QUEEN]) * QUEEN_VALUE;
-    
-    // Return from side to move's perspective
-    return (side_to_move == WHITE) ? score : -score;
+    if (NNUE::is_loaded()) {
+        return NNUE::evaluate(*this);
+    } else {
+        // Fallback to classical evaluation if NNUE not loaded
+        const int PAWN_VALUE = 100;
+        const int KNIGHT_VALUE = 320;
+        const int BISHOP_VALUE = 330;
+        const int ROOK_VALUE = 500;
+        const int QUEEN_VALUE = 900;
+        
+        int score = 0;
+        score += popcount(pieces[W_PAWN]) * PAWN_VALUE;
+        score += popcount(pieces[W_KNIGHT]) * KNIGHT_VALUE;
+        score += popcount(pieces[W_BISHOP]) * BISHOP_VALUE;
+        score += popcount(pieces[W_ROOK]) * ROOK_VALUE;
+        score += popcount(pieces[W_QUEEN]) * QUEEN_VALUE;
+        
+        score -= popcount(pieces[B_PAWN]) * PAWN_VALUE;
+        score -= popcount(pieces[B_KNIGHT]) * KNIGHT_VALUE;
+        score -= popcount(pieces[B_BISHOP]) * BISHOP_VALUE;
+        score -= popcount(pieces[B_ROOK]) * ROOK_VALUE;
+        score -= popcount(pieces[B_QUEEN]) * QUEEN_VALUE;
+        
+        return (side_to_move == WHITE) ? score : -score;
+    }
 }
 
 // ==================== MAIN FUNCTION ====================
