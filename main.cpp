@@ -384,7 +384,7 @@ struct UndoInfo {
 };
 
 class Position {
-private:
+public:
     // Bitboards for each piece type
     Bitboard pieces[13]; // 0: empty (unused), 1-6: white, 7-12: black
     Bitboard occupied[2]; // White and black occupancy
@@ -405,6 +405,8 @@ private:
     
     // Move history for undo
     std::vector<UndoInfo> history;
+    
+private:
     
     // Update hash when piece moves
     void update_hash_remove(int piece, int square) {
@@ -460,6 +462,16 @@ public:
     int get_en_passant_square() const { return en_passant_square; }
     Bitboard get_hash() const { return hash; }
     
+    // Helper method for move scoring
+    int get_piece_at(int square) const {
+        for (int p = 1; p <= 12; p++) {
+            if (pieces[p] & SQ(square)) {
+                return p;
+            }
+        }
+        return EMPTY;
+    }
+    
     // Move generation
     std::vector<Move> generate_moves() const;
     std::vector<Move> generate_captures() const;
@@ -487,6 +499,16 @@ public:
     
     // Debug
     void print() const;
+    
+    // Helper method for move scoring
+    int get_piece_at(int square) const {
+        for (int p = 1; p <= 12; p++) {
+            if (pieces[p] & SQ(square)) {
+                return p;
+            }
+        }
+        return EMPTY;
+    }
 };
 
 // ==================== MOVE GENERATION ====================
@@ -689,16 +711,35 @@ std::vector<Move> Position::generate_quiet_moves() const {
 std::vector<Move> Position::generate_legal_moves() const {
     auto pseudo_legal = generate_moves();
     std::vector<Move> legal;
+    legal.reserve(pseudo_legal.size());
     
-    int our_color = side_to_move;  // Save before make_move
+    int our_color = side_to_move;
+    int king_piece = (our_color == WHITE) ? W_KING : B_KING;
+    
+    // Get king position BEFORE any moves
+    Bitboard king_bb = pieces[king_piece];
+    if (king_bb == 0) {
+        // No king - invalid position
+        return legal;
+    }
+    int king_sq = lsb(king_bb);
     
     for (const auto& move : pseudo_legal) {
+        // Create a lightweight copy for validation
         Position temp = *this;
-        if (!temp.make_move(move)) continue;  // Check if move succeeded
         
-        // Check if our king is in check after the move
-        int king_sq = lsb(temp.pieces[our_color == WHITE ? W_KING : B_KING]);
-        if (!temp.is_square_attacked(king_sq, 1 - our_color)) {
+        // Make the move
+        if (!temp.make_move(move)) continue;
+        
+        // Find king position after move (might have moved)
+        Bitboard new_king_bb = temp.pieces[king_piece];
+        if (new_king_bb == 0) continue; // King captured (invalid)
+        
+        int new_king_sq = lsb(new_king_bb);
+        
+        // Check if king is attacked AFTER the move
+        // Use direct attack check WITHOUT calling generate_legal_moves again
+        if (!temp.is_square_attacked(new_king_sq, 1 - our_color)) {
             legal.push_back(move);
         }
     }
@@ -1829,49 +1870,272 @@ public:
     }
 };
 
+// ==================== SEARCH OPTIMIZATIONS ====================
+
+// Transposition Table
+struct TTEntry {
+    Bitboard hash;
+    int depth;
+    int score;
+    int flag;  // 0=exact, 1=lower_bound, 2=upper_bound
+    Move best_move;
+};
+
+static std::vector<TTEntry> transposition_table(1 << 20);  // 1M entries
+static constexpr int EXACT = 0;
+static constexpr int LOWER_BOUND = 1;
+static constexpr int UPPER_BOUND = 2;
+
+// Killer moves for move ordering
+static Move killer_moves[2][100];  // 2 killers per depth
+
+// History heuristic for move ordering
+static int history_table[13][64][64];
+
+// Global node counter
+static uint64_t nodes_searched = 0;
+
+// Move scoring for ordering
+static int score_move(const Position& pos, const Move& move, int depth) {
+    int score = 0;
+    
+    // MVV-LVA (Most Valuable Victim - Least Valuable Attacker)
+    if (move.is_capture()) {
+        int victim = pos.get_piece_at(move.to());
+        int attacker = pos.get_piece_at(move.from());
+        
+        // Piece values: P=1, N=2, B=3, R=4, Q=5, K=6
+        int victim_value = (victim == W_PAWN || victim == B_PAWN) ? 1 :
+                          (victim == W_KNIGHT || victim == B_KNIGHT) ? 2 :
+                          (victim == W_BISHOP || victim == B_BISHOP) ? 3 :
+                          (victim == W_ROOK || victim == B_ROOK) ? 4 :
+                          (victim == W_QUEEN || victim == B_QUEEN) ? 5 : 6;
+        int attacker_value = (attacker == W_PAWN || attacker == B_PAWN) ? 1 :
+                            (attacker == W_KNIGHT || attacker == B_KNIGHT) ? 2 :
+                            (attacker == W_BISHOP || attacker == B_BISHOP) ? 3 :
+                            (attacker == W_ROOK || attacker == B_ROOK) ? 4 :
+                            (attacker == W_QUEEN || attacker == B_QUEEN) ? 5 : 6;
+        
+        score += 1000000 + (victim_value * 1000) - attacker_value;
+    }
+    
+    // Promotion bonus
+    if (move.is_promotion()) {
+        score += 900000;
+    }
+    
+    // Killer move bonus
+    if (depth < 100) {
+        if (killer_moves[0][depth] == move) score += 800000;
+        else if (killer_moves[1][depth] == move) score += 700000;
+    }
+    
+    // History heuristic bonus
+    int piece = pos.get_piece_at(move.from());
+    score += history_table[piece][move.from()][move.to()];
+    
+    // Center control bonus
+    int to_file = file_of(move.to());
+    int to_rank = rank_of(move.to());
+    if ((to_file == 3 || to_file == 4) && (to_rank == 3 || to_rank == 4)) {
+        score += 10000;
+    }
+    
+    return score;
+}
+
+// Helper function to evaluate position
+static int evaluate_position(const Position& pos) {
+    return pos.evaluate();
+}
+
+// Quiescence search
+static int quiescence(Position& pos, int alpha, int beta, int ply = 0) {
+    // Limit quiescence depth
+    if (ply >= 10) {
+        return evaluate_position(pos);
+    }
+    
+    nodes_searched++;
+    
+    // Stand-pat
+    int stand_pat = evaluate_position(pos);
+    if (stand_pat >= beta) return beta;
+    if (alpha < stand_pat) alpha = stand_pat;
+    
+    // Delta pruning
+    const int QUEEN_VALUE = 900;
+    if (stand_pat + QUEEN_VALUE < alpha) {
+        return alpha; // Even capturing a queen won't help
+    }
+    
+    // Generate captures only
+    auto captures = pos.generate_captures();
+    
+    // Score and sort captures
+    std::vector<std::pair<Move, int>> scored_moves;
+    scored_moves.reserve(captures.size());
+    for (const auto& move : captures) {
+        scored_moves.emplace_back(move, score_move(pos, move, 0));
+    }
+    std::sort(scored_moves.begin(), scored_moves.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+    
+    int our_color = pos.get_side_to_move();
+    int king_piece = (our_color == WHITE) ? W_KING : B_KING;
+    
+    for (const auto& scored_move : scored_moves) {
+        const Move& move = scored_move.first;
+        
+        Position temp = pos;
+        if (!temp.make_move(move)) continue;
+        
+        // Legality check
+        Bitboard king_bb = temp.pieces[king_piece];
+        if (king_bb == 0) continue;
+        
+        int king_sq = lsb(king_bb);
+        if (temp.is_square_attacked(king_sq, 1 - our_color)) {
+            continue;
+        }
+        
+        int score_after = -quiescence(temp, -beta, -alpha, ply + 1);
+        
+        if (score_after >= beta) return beta;
+        if (score_after > alpha) alpha = score_after;
+    }
+    
+    return alpha;
+}
+
+// Alpha-beta search with optimizations
+static int alpha_beta(Position& pos, int depth, int alpha, int beta) {
+    nodes_searched++;
+    
+    // Transposition table lookup
+    Bitboard hash = pos.get_hash();
+    int tt_index = hash % transposition_table.size();
+    TTEntry& entry = transposition_table[tt_index];
+    
+    if (entry.hash == hash && entry.depth >= depth) {
+        if (entry.flag == EXACT) return entry.score;
+        if (entry.flag == LOWER_BOUND) alpha = std::max(alpha, entry.score);
+        if (entry.flag == UPPER_BOUND) beta = std::min(beta, entry.score);
+        if (alpha >= beta) return entry.score;
+    }
+    
+    if (depth == 0) {
+        return quiescence(pos, alpha, beta);
+    }
+    
+    // Use pseudo-legal moves to avoid recursion
+    auto moves = pos.generate_moves();
+    if (moves.empty()) {
+        if (pos.is_check()) {
+            return -30000 + (100 - depth); // Prefer faster mates
+        }
+        return 0; // Stalemate
+    }
+    
+    // Score and sort moves
+    std::vector<std::pair<Move, int>> scored_moves;
+    scored_moves.reserve(moves.size());
+    for (const auto& move : moves) {
+        scored_moves.emplace_back(move, score_move(pos, move, depth));
+    }
+    std::sort(scored_moves.begin(), scored_moves.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+    
+    int best_score = -30000;
+    Move best_move;
+    int legal_moves = 0;
+    
+    int our_color = pos.get_side_to_move();
+    int king_piece = (our_color == WHITE) ? W_KING : B_KING;
+    
+    for (const auto& scored_move : scored_moves) {
+        const Move& move = scored_move.first;
+        
+        // Make move on copy
+        Position temp = pos;
+        if (!temp.make_move(move)) continue;
+        
+        // Legality check: ensure our king is not in check
+        Bitboard king_bb = temp.pieces[king_piece];
+        if (king_bb == 0) continue; // King captured
+        
+        int king_sq = lsb(king_bb);
+        if (temp.is_square_attacked(king_sq, 1 - our_color)) {
+            continue; // Illegal move - king in check
+        }
+        
+        legal_moves++;
+        
+        // Search
+        int score_after;
+        if (legal_moves == 1) {
+            // Full search for first legal move
+            score_after = -alpha_beta(temp, depth - 1, -beta, -alpha);
+        } else {
+            // Null window search
+            score_after = -alpha_beta(temp, depth - 1, -alpha - 1, -alpha);
+            if (score_after > alpha && score_after < beta) {
+                // Re-search with full window
+                score_after = -alpha_beta(temp, depth - 1, -beta, -alpha);
+            }
+        }
+        
+        if (score_after > best_score) {
+            best_score = score_after;
+            best_move = move;
+            if (score_after > alpha) {
+                alpha = score_after;
+            }
+        }
+        
+        if (alpha >= beta) {
+            // Store killer move
+            if (depth < 100 && !move.is_capture()) {
+                killer_moves[1][depth] = killer_moves[0][depth];
+                killer_moves[0][depth] = move;
+            }
+            
+            // Update history heuristic
+            int piece = pos.get_piece_at(move.from());
+            if (piece >= 1 && piece <= 12) {
+                history_table[piece][move.from()][move.to()] += depth * depth;
+            }
+            
+            break; // Beta cutoff
+        }
+    }
+    
+    // No legal moves found
+    if (legal_moves == 0) {
+        if (pos.is_check()) {
+            return -30000 + (100 - depth); // Checkmate
+        }
+        return 0; // Stalemate
+    }
+    
+    // Store in transposition table
+    entry.hash = hash;
+    entry.depth = depth;
+    entry.score = best_score;
+    entry.best_move = best_move;
+    
+    if (best_score <= alpha) entry.flag = UPPER_BOUND;
+    else if (best_score >= beta) entry.flag = LOWER_BOUND;
+    else entry.flag = EXACT;
+    
+    return best_score;
+}
+
 // ==================== SEARCH ALGORITHM ====================
 
 class Search {
 private:
     static uint64_t nodes_searched;  // Node counter
-    
-    // Helper function to evaluate position
-    static int evaluate_position(const Position& pos) {
-        return pos.evaluate();
-    }
-    
-    static int alpha_beta(Position& pos, int depth, int alpha, int beta) {
-        nodes_searched++;  // Count this node
-        
-        if (depth == 0) {
-            return evaluate_position(pos);
-        }
-        
-        auto moves = pos.generate_legal_moves();
-        if (moves.empty()) {
-            if (pos.is_check()) {
-                return -30000 + depth; // Checkmate (prefer later mates)
-            }
-            return 0; // Stalemate
-        }
-        
-        int max_score = -1000000;
-        
-        for (const auto& move : moves) {
-            Position temp_pos = pos; // Create copy to avoid modifying original
-            if (!temp_pos.make_move(move)) continue;  // Safety check
-            int score = -alpha_beta(temp_pos, depth - 1, -beta, -alpha);
-            
-            max_score = std::max(max_score, score);
-            alpha = std::max(alpha, score);
-            
-            if (alpha >= beta) {
-                break; // Beta cutoff
-            }
-        }
-        
-        return max_score;
-    }
     
     static std::pair<Move, int> find_best_move(Position& pos, int depth) {
         auto moves = pos.generate_legal_moves();
@@ -1900,7 +2164,7 @@ private:
                     best_move = move;
                 } else if (!move.is_capture() && !best_move.is_capture()) {
                     // Prefer center pawn moves
-                    int to_file = file_of(move.to());
+                    int to_file = file_of(best_move.to());
                     int best_to_file = file_of(best_move.to());
                     if ((to_file == 3 || to_file == 4) && (best_to_file != 3 && best_to_file != 4)) {
                         best_score = score;
