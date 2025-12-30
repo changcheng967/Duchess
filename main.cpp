@@ -1930,16 +1930,42 @@ static Move killer_moves[2][100];  // 2 killers per depth
 // History heuristic for move ordering
 static int history_table[13][64][64];
 
+// Principal Variation table for move ordering
+static Move pv_table[100][100];  // PV at each ply
+static int pv_length[100];       // Length at each ply
+
+// Countermove heuristic
+static Move countermove_table[13][64];  // [piece][to_square]
+
+// Continuation history
+static int continuation_history[13][64][13][64];
+
+// Capture history
+static int capture_history[13][64][13];  // [attacker][to][victim]
+
 // Global node counter
 static uint64_t nodes_searched = 0;
 
 // Move scoring for ordering with improved heuristics
-static int score_move(const Position& pos, const Move& move, int depth, const Move& tt_move = Move()) {
+static int score_move(const Position& pos, const Move& move, int depth, const Move& tt_move = Move(), int ply = 0, const Move& prev_move = Move()) {
     int score = 0;
+    
+    // PV move gets highest priority (after TT move)
+    if (ply < pv_length[0] && move == pv_table[0][ply]) {
+        return 20000000;  // Highest priority after TT
+    }
     
     // TT move gets highest priority
     if (move == tt_move) {
         return 10000000;  // Highest score
+    }
+    
+    // Countermove bonus
+    if (ply > 0 && prev_move.data != 0) {
+        int prev_piece = pos.get_piece_at(prev_move.to());
+        if (move == countermove_table[prev_piece][prev_move.to()]) {
+            score += 600000;
+        }
     }
     
     // MVV-LVA (Most Valuable Victim - Least Valuable Attacker)
@@ -1969,6 +1995,10 @@ static int score_move(const Position& pos, const Move& move, int depth, const Mo
         // Improved MVV-LVA scoring
         score += 1000000 + (victim_value * 10) - attacker_value;
         
+        // Capture history bonus
+        if (attacker >= 1 && attacker <= 12 && victim >= 1 && victim <= 12) {
+            score += capture_history[attacker][move.to()][victim];
+        }
     }
     
     // Promotion bonus with piece preference
@@ -1994,6 +2024,12 @@ static int score_move(const Position& pos, const Move& move, int depth, const Mo
     int piece = pos.get_piece_at(move.from());
     if (piece >= 1 && piece <= 12) {
         score += history_table[piece][move.from()][move.to()] * (depth + 1);
+        
+        // Continuation history bonus
+        if (ply > 0 && prev_move.data != 0) {
+            int prev_piece = pos.get_piece_at(prev_move.to());
+            score += continuation_history[prev_piece][prev_move.to()][piece][move.to()];
+        }
     }
     
     // Center control bonus (improved)
@@ -2120,19 +2156,58 @@ static int quiescence(Position& pos, int alpha, int beta, int ply = 0) {
 }
 
 // Alpha-beta search with optimizations
-static int alpha_beta(Position& pos, int depth, int alpha, int beta) {
+static int alpha_beta(Position& pos, int depth, int alpha, int beta, int ply = 0) {
     nodes_searched++;
+    
+    // Reverse Futility Pruning
+    if (depth <= 6 && !pos.is_check() && alpha > -20000 && beta < 20000) {
+        int eval = evaluate_position(pos);
+        int rfp_margin = 80 * depth;
+        
+        if (eval - rfp_margin >= beta) {
+            return eval;  // Position too good, opponent won't allow
+        }
+    }
+    
+    // Razoring
+    if (depth <= 3 && !pos.is_check() && alpha > -20000 && beta < 20000) {
+        int eval = evaluate_position(pos);
+        int razor_margin = 300 + 100 * depth;
+        
+        if (eval + razor_margin < alpha) {
+            // Position very bad, go straight to quiescence
+            int q_score = quiescence(pos, alpha, beta, ply);
+            if (q_score <= alpha) {
+                return q_score;
+            }
+        }
+    }
     
     // Transposition table lookup
     Bitboard hash = pos.get_hash();
     size_t tt_idx = tt_index(hash);
     TTEntry& entry = transposition_table[tt_idx];
     
+    // Get TT move for better ordering
+    Move tt_move = (entry.hash == hash && entry.depth > 0) ? entry.best_move : Move();
+    
     if (entry.hash == hash && entry.depth >= depth) {
         if (entry.flag == EXACT) return entry.score;
         if (entry.flag == LOWER_BOUND) alpha = std::max(alpha, entry.score);
         if (entry.flag == UPPER_BOUND) beta = std::min(beta, entry.score);
         if (alpha >= beta) return entry.score;
+    }
+    
+    // Internal Iterative Deepening (IID)
+    if (depth >= 4 && !tt_move.data && !pos.is_check()) {
+        int iid_depth = depth - 2;
+        alpha_beta(pos, iid_depth, alpha, beta, ply);
+        
+        // Reload TT entry
+        TTEntry& new_entry = transposition_table[tt_idx];
+        if (new_entry.hash == hash) {
+            tt_move = new_entry.best_move;
+        }
     }
     
     // Null Move Pruning
@@ -2159,7 +2234,7 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta) {
             int R = (depth > 6) ? 3 : 2;
             
             // Search with reduced depth
-            int null_score = -alpha_beta(null_pos, depth - 1 - R, -beta, -beta + 1);
+            int null_score = -alpha_beta(null_pos, depth - 1 - R, -beta, -beta + 1, ply + 1);
             
             // If null move fails high, we can prune
             if (null_score >= beta) {
@@ -2171,7 +2246,7 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta) {
     }
     
     if (depth == 0) {
-        return quiescence(pos, alpha, beta);
+        return quiescence(pos, alpha, beta, ply);
     }
     
     // Use pseudo-legal moves to avoid recursion
@@ -2183,15 +2258,29 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta) {
         return 0; // Stalemate
     }
     
-    // Score and sort moves
-    std::vector<std::pair<Move, int>> scored_moves;
-    // Get TT move from transposition table
-    Move tt_move = (entry.hash == hash && entry.depth > 0) ? entry.best_move : Move();
+    // Futility Pruning setup (calculate once)
+    bool in_pv = (alpha != beta - 1);
+    bool can_prune = false;
     
-    scored_moves.reserve(moves.size());
-    for (const auto& move : moves) {
-        scored_moves.emplace_back(move, score_move(pos, move, depth, tt_move));
+    if (depth <= 3 && !pos.is_check() && !in_pv) {
+        int eval = evaluate_position(pos);
+        int futility_margin = 100 + 150 * depth;
+        can_prune = (eval + futility_margin <= alpha);
     }
+    
+    // Score and sort moves (ONLY ONCE!)
+    std::vector<std::pair<Move, int>> scored_moves;
+    scored_moves.reserve(moves.size());
+    
+    for (const auto& move : moves) {
+        // Apply futility pruning here
+        if (can_prune && !move.is_capture() && !move.is_promotion()) {
+            continue;  // Skip futile quiet moves
+        }
+        
+        scored_moves.emplace_back(move, score_move(pos, move, depth, tt_move, ply));
+    }
+    
     std::sort(scored_moves.begin(), scored_moves.end(),
               [](const auto& a, const auto& b) { return a.second > b.second; });
     
@@ -2203,6 +2292,15 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta) {
     int king_piece = (our_color == WHITE) ? W_KING : B_KING;
     
     int moves_searched = 0;
+    
+    // Score and sort moves normally
+    std::vector<std::pair<Move, int>> scored_moves;
+    scored_moves.reserve(moves.size());
+    for (const auto& move : moves) {
+        scored_moves.emplace_back(move, score_move(pos, move, depth, tt_move, ply));
+    }
+    std::sort(scored_moves.begin(), scored_moves.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
     
     for (const auto& scored_move : scored_moves) {
         const Move& move = scored_move.first;
@@ -2239,28 +2337,38 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta) {
             reduction = std::min(reduction, depth - 2);
             
             // Search with reduced depth
-            score_after = -alpha_beta(temp, depth - 1 - reduction, -alpha - 1, -alpha);
+            score_after = -alpha_beta(temp, depth - 1 - reduction, -alpha - 1, -alpha, ply + 1);
             
             // If it fails high, re-search at full depth
             if (score_after > alpha) {
-                score_after = -alpha_beta(temp, depth - 1, -alpha - 1, -alpha);
+                score_after = -alpha_beta(temp, depth - 1, -beta, -alpha, ply + 1);
             }
         } else if (moves_searched == 1) {
             // Full window search for first move
-            score_after = -alpha_beta(temp, depth - 1, -beta, -alpha);
+            score_after = -alpha_beta(temp, depth - 1, -beta, -alpha, ply + 1);
         } else {
             // Null window search (PVS)
-            score_after = -alpha_beta(temp, depth - 1, -alpha - 1, -alpha);
+            score_after = -alpha_beta(temp, depth - 1, -alpha - 1, -alpha, ply + 1);
             
             // Re-search if it beats alpha
             if (score_after > alpha && score_after < beta) {
-                score_after = -alpha_beta(temp, depth - 1, -beta, -alpha);
+                score_after = -alpha_beta(temp, depth - 1, -beta, -alpha, ply + 1);
             }
         }
         
         if (score_after > best_score) {
             best_score = score_after;
             best_move = move;
+            
+            // Store PV
+            if (ply < 99) {
+                pv_table[ply][0] = move;
+                for (int i = 0; i < pv_length[ply + 1]; i++) {
+                    pv_table[ply][i + 1] = pv_table[ply + 1][i];
+                }
+                pv_length[ply] = pv_length[ply + 1] + 1;
+            }
+            
             if (score_after > alpha) {
                 alpha = score_after;
             }
@@ -2271,16 +2379,35 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta) {
             if (depth < 100 && !move.is_capture()) {
                 killer_moves[1][depth] = killer_moves[0][depth];
                 killer_moves[0][depth] = move;
+                
+                // Update countermove
+                if (ply > 0) {
+                    int prev_piece = pos.get_piece_at(pv_table[0][ply - 1].to());
+                    countermove_table[prev_piece][pv_table[0][ply - 1].to()] = move;
+                }
             }
             
-            // Update history heuristic with aging
+            // Update history heuristic
             int piece = pos.get_piece_at(move.from());
             if (piece >= 1 && piece <= 12) {
                 history_table[piece][move.from()][move.to()] += depth * depth;
                 
+                // Update continuation history
+                if (ply > 0) {
+                    int prev_piece = pos.get_piece_at(pv_table[0][ply - 1].to());
+                    continuation_history[prev_piece][pv_table[0][ply - 1].to()][piece][move.to()] += depth * depth;
+                }
+                
+                // Update capture history
+                if (move.is_capture()) {
+                    int victim = pos.get_piece_at(move.to());
+                    if (victim >= 1 && victim <= 12) {
+                        capture_history[piece][move.to()][victim] += depth * depth;
+                    }
+                }
+                
                 // Age history table to prevent overflow
                 if (history_table[piece][move.from()][move.to()] > 10000) {
-                    // Divide all history scores by 2
                     for (int p = 1; p <= 12; p++) {
                         for (int f = 0; f < 64; f++) {
                             for (int t = 0; t < 64; t++) {
@@ -2346,7 +2473,7 @@ private:
                     Position temp_pos = pos;
                     if (!temp_pos.make_move(move)) continue;
                     
-                    int score = -alpha_beta(temp_pos, depth - 1, -beta, -alpha);
+                    int score = -alpha_beta(temp_pos, depth - 1, -beta, -alpha, 1);
                     
                     if (score > best_score) {
                         best_score = score;
@@ -2377,7 +2504,7 @@ private:
                 Position temp_pos = pos;
                 if (!temp_pos.make_move(move)) continue;
                 
-                int score = -alpha_beta(temp_pos, depth - 1, -1000000, 1000000);
+                int score = -alpha_beta(temp_pos, depth - 1, -1000000, 1000000, 1);
                 
                 if (score > best_score) {
                     best_score = score;
