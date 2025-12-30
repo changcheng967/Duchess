@@ -2185,9 +2185,12 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta) {
     
     // Score and sort moves
     std::vector<std::pair<Move, int>> scored_moves;
+    // Get TT move from transposition table
+    Move tt_move = (entry.hash == hash && entry.depth > 0) ? entry.best_move : Move();
+    
     scored_moves.reserve(moves.size());
     for (const auto& move : moves) {
-        scored_moves.emplace_back(move, score_move(pos, move, depth));
+        scored_moves.emplace_back(move, score_move(pos, move, depth, tt_move));
     }
     std::sort(scored_moves.begin(), scored_moves.end(),
               [](const auto& a, const auto& b) { return a.second > b.second; });
