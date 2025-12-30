@@ -1466,7 +1466,21 @@ namespace NNUE {
             output += layer2_output[i] * output_weights[i];
         }
         
-        int eval = (output * 600) / (127 * OUTPUT_SCALE);
+        // Scale output to centipawns (reduced from 600 to 400)
+        int eval = (output * 400) / (127 * OUTPUT_SCALE);
+        
+        // Apply game phase scaling
+        int total_material = 0;
+        for (int p = W_PAWN; p <= B_QUEEN; p++) {
+            if (p != W_KING && p != B_KING) {
+                total_material += popcount(pos.get_pieces(p));
+            }
+        }
+        
+        // Reduce evaluation in endgames
+        if (total_material < 16) {
+            eval = (eval * (total_material + 16)) / 32;
+        }
         
         return eval;
     }
@@ -1946,10 +1960,6 @@ static int score_move(const Position& pos, const Move& move, int depth) {
         // Improved MVV-LVA scoring
         score += 1000000 + (victim_value * 10) - attacker_value;
         
-        // Bonus for recaptures (same square)
-        if (depth > 0 && move.to() == move.from()) {
-            score += 50000;
-        }
     }
     
     // Promotion bonus with piece preference
@@ -2012,7 +2022,7 @@ static int evaluate_position(const Position& pos) {
 // Quiescence search with improved capture ordering and delta pruning
 static int quiescence(Position& pos, int alpha, int beta, int ply = 0) {
     // Limit quiescence depth to prevent stack overflow
-    if (ply >= 16) {
+    if (ply >= 8) {
         return evaluate_position(pos);
     }
     
@@ -2024,7 +2034,7 @@ static int quiescence(Position& pos, int alpha, int beta, int ply = 0) {
     if (alpha < stand_pat) alpha = stand_pat;
     
     // Delta pruning: if even capturing the most valuable piece won't help
-    const int MAX_MATERIAL_GAIN = 900; // Queen value
+    const int MAX_MATERIAL_GAIN = 1000; // Queen value + margin
     if (stand_pat + MAX_MATERIAL_GAIN < alpha) {
         return alpha;
     }
@@ -2251,10 +2261,22 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta) {
                 killer_moves[0][depth] = move;
             }
             
-            // Update history heuristic
+            // Update history heuristic with aging
             int piece = pos.get_piece_at(move.from());
             if (piece >= 1 && piece <= 12) {
                 history_table[piece][move.from()][move.to()] += depth * depth;
+                
+                // Age history table to prevent overflow
+                if (history_table[piece][move.from()][move.to()] > 10000) {
+                    // Divide all history scores by 2
+                    for (int p = 1; p <= 12; p++) {
+                        for (int f = 0; f < 64; f++) {
+                            for (int t = 0; t < 64; t++) {
+                                history_table[p][f][t] /= 2;
+                            }
+                        }
+                    }
+                }
             }
             
             break; // Beta cutoff
@@ -2269,15 +2291,17 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta) {
         return 0; // Stalemate
     }
     
-    // Store in transposition table
-    entry.hash = hash;
-    entry.depth = depth;
-    entry.score = best_score;
-    entry.best_move = best_move;
-    
-    if (best_score <= alpha) entry.flag = UPPER_BOUND;
-    else if (best_score >= beta) entry.flag = LOWER_BOUND;
-    else entry.flag = EXACT;
+    // Store in transposition table (only if better)
+    if (entry.hash != hash || entry.depth <= depth) {
+        entry.hash = hash;
+        entry.depth = depth;
+        entry.score = best_score;
+        entry.best_move = best_move;
+        
+        if (best_score <= alpha) entry.flag = UPPER_BOUND;
+        else if (best_score >= beta) entry.flag = LOWER_BOUND;
+        else entry.flag = EXACT;
+    }
     
     return best_score;
 }
