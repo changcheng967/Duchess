@@ -891,6 +891,9 @@ void Position::print() const {
 // ==================== COMPLETE FIXED NNUE EVALUATION ====================
 // Replace the entire NNUE namespace in your code with this implementation
 
+// ==================== COMPLETE FIXED NNUE EVALUATION ====================
+// Replace the entire NNUE namespace in your code with this implementation
+
 namespace NNUE {
     // Stockfish NNUE architecture: HalfKAv2_hm (768->256x2->32->32->1)
     constexpr int FEATURE_TRANSFORMER_INPUT = 768;    // 12 piece types × 64 squares
@@ -932,75 +935,314 @@ namespace NNUE {
         }
     };
     
-    // Load NNUE weights from Stockfish format file
+    // LEB128 decompression helper
+    class LEB128Reader {
+    private:
+        std::ifstream& file;
+        size_t bytes_read;
+        
+    public:
+        LEB128Reader(std::ifstream& f) : file(f), bytes_read(0) {}
+        
+        size_t get_bytes_read() const { return bytes_read; }
+        
+        // Read a signed LEB128-encoded integer
+        int32_t read_int() {
+            int32_t result = 0;
+            int shift = 0;
+            uint8_t byte;
+            
+            do {
+                if (!file.read(reinterpret_cast<char*>(&byte), 1)) {
+                    throw std::runtime_error("Unexpected EOF in LEB128 stream");
+                }
+                bytes_read++;
+                result |= (byte & 0x7F) << shift;
+                shift += 7;
+            } while (byte & 0x80);
+            
+            // Sign extend if necessary
+            if (shift < 32 && (byte & 0x40)) {
+                result |= -(1 << shift);
+            }
+            
+            return result;
+        }
+        
+        // Read array of int16_t values
+        void read_int16_array(int16_t* array, size_t count) {
+            for (size_t i = 0; i < count; i++) {
+                array[i] = static_cast<int16_t>(read_int());
+            }
+        }
+        
+        // Read array of int8_t values
+        void read_int8_array(int8_t* array, size_t count) {
+            for (size_t i = 0; i < count; i++) {
+                array[i] = static_cast<int8_t>(read_int());
+            }
+        }
+        
+        // Read array of int32_t values
+        void read_int32_array(int32_t* array, size_t count) {
+            for (size_t i = 0; i < count; i++) {
+                array[i] = read_int();
+            }
+        }
+    };
+    
+    // Load NNUE weights from Stockfish format file (supports compressed and uncompressed)
     bool load_nnue(const std::string& filename) {
         std::ifstream file(filename, std::ios::binary);
         if (!file.is_open()) {
-            std::cerr << "Failed to open NNUE file: " << filename << std::endl;
-            return false;
+            return false;  // Silently fail, will try next path
         }
+        
+        // Get file size for validation
+        file.seekg(0, std::ios::end);
+        size_t file_size = file.tellg();
+        file.seekg(0, std::ios::beg);
+        
+        std::cout << "\n=== Loading NNUE File ===" << std::endl;
+        std::cout << "File: " << filename << std::endl;
+        std::cout << "Size: " << file_size << " bytes (" << (file_size / 1024) << " KB)" << std::endl;
         
         // Read header (version 0x7AF32F20 = Stockfish NNUE)
         uint32_t version;
         file.read(reinterpret_cast<char*>(&version), sizeof(version));
         
         if (version != 0x7AF32F20 && version != 0x7AF32F16) {
-            std::cerr << "Invalid NNUE version: 0x" << std::hex << version << std::dec << std::endl;
+            std::cerr << "ERROR: Invalid NNUE version: 0x" << std::hex << version << std::dec << std::endl;
             file.close();
             return false;
         }
         
-        std::cout << "Loading NNUE file version: 0x" << std::hex << version << std::dec << std::endl;
+        std::cout << "Version: 0x" << std::hex << version << std::dec << std::endl;
         
         // Read hash
         uint32_t hash_value;
         file.read(reinterpret_cast<char*>(&hash_value), sizeof(hash_value));
+        std::cout << "Hash: 0x" << std::hex << hash_value << std::dec << std::endl;
         
-        // Read architecture string (null-terminated)
+        // Read architecture string with robust error handling
         std::string architecture;
         char c;
-        while (file.get(c) && c != '\0') {
+        int max_arch_length = 2048;
+        int arch_bytes_read = 0;
+        bool found_null = false;
+        
+        while (arch_bytes_read < max_arch_length) {
+            if (!file.get(c)) {
+                std::cerr << "ERROR: EOF while reading architecture string" << std::endl;
+                file.close();
+                return false;
+            }
+            
+            arch_bytes_read++;
+            
+            if (c == '\0') {
+                found_null = true;
+                break;
+            }
+            
+            // Add all characters (printable or not) for now
             architecture += c;
         }
-        std::cout << "Architecture: " << architecture << std::endl;
         
-        // Helper lambda to read a section
+        if (!found_null) {
+            std::cerr << "ERROR: Architecture string too long" << std::endl;
+            file.close();
+            return false;
+        }
+        
+        // Clean architecture string (remove non-printable chars)
+        std::string clean_arch;
+        for (char ch : architecture) {
+            if (ch >= 32 && ch <= 126) {
+                clean_arch += ch;
+            }
+        }
+        
+        std::cout << "Architecture: " << clean_arch << std::endl;
+        std::cout << "Arch length: " << clean_arch.length() << " bytes" << std::endl;
+        
+        // Detect compression
+        bool is_compressed = (clean_arch.find("COMPRESSED") != std::string::npos) ||
+                            (file_size > 50000000);  // Files > 50MB are likely compressed
+        
+        std::cout << "Compression: " << (is_compressed ? "LEB128" : "Raw Binary") << std::endl;
+        
+        // Helper lambda to read section hash
         auto read_section = [&file]() {
             uint32_t hash;
             file.read(reinterpret_cast<char*>(&hash), sizeof(hash));
             return hash;
         };
         
-        // Read Feature Transformer section
-        read_section(); // Skip hash
-        file.read(reinterpret_cast<char*>(feature_biases),
-                  FEATURE_TRANSFORMER_OUTPUT * sizeof(int16_t));
-        file.read(reinterpret_cast<char*>(feature_weights),
-                  FEATURE_TRANSFORMER_INPUT * FEATURE_TRANSFORMER_OUTPUT * sizeof(int16_t));
-        
-        // Read Layer 1 section
-        read_section(); // Skip hash
-        file.read(reinterpret_cast<char*>(layer1_biases),
-                  LAYER1_OUTPUT * sizeof(int32_t));
-        file.read(reinterpret_cast<char*>(layer1_weights),
-                  LAYER1_INPUT * LAYER1_OUTPUT * sizeof(int8_t));
-        
-        // Read Layer 2 section
-        read_section(); // Skip hash
-        file.read(reinterpret_cast<char*>(layer2_biases),
-                  LAYER2_OUTPUT * sizeof(int32_t));
-        file.read(reinterpret_cast<char*>(layer2_weights),
-                  LAYER2_INPUT * LAYER2_OUTPUT * sizeof(int8_t));
-        
-        // Read Output section
-        read_section(); // Skip hash
-        file.read(reinterpret_cast<char*>(&output_bias), sizeof(int32_t));
-        file.read(reinterpret_cast<char*>(output_weights),
-                  LAYER2_OUTPUT * sizeof(int8_t));
+        try {
+            if (is_compressed) {
+                // ===== COMPRESSED FORMAT (LEB128) =====
+                std::cout << "\n--- Decompressing LEB128 Data ---" << std::endl;
+                LEB128Reader reader(file);
+                
+                // Feature Transformer
+                std::cout << "Reading Feature Transformer..." << std::endl;
+                uint32_t ft_hash = read_section();
+                std::cout << "  Section hash: 0x" << std::hex << ft_hash << std::dec << std::endl;
+                
+                reader.read_int16_array(feature_biases, FEATURE_TRANSFORMER_OUTPUT);
+                std::cout << "  Biases: " << FEATURE_TRANSFORMER_OUTPUT << " values" << std::endl;
+                
+                // Weights are stored transposed: [output][input]
+                for (int i = 0; i < FEATURE_TRANSFORMER_OUTPUT; i++) {
+                    for (int j = 0; j < FEATURE_TRANSFORMER_INPUT; j++) {
+                        feature_weights[j][i] = static_cast<int16_t>(reader.read_int());
+                    }
+                    if (i % 64 == 0) {
+                        std::cout << "  Progress: " << i << "/" << FEATURE_TRANSFORMER_OUTPUT << "\r" << std::flush;
+                    }
+                }
+                std::cout << "  Weights: " << (FEATURE_TRANSFORMER_INPUT * FEATURE_TRANSFORMER_OUTPUT)
+                          << " values (" << reader.get_bytes_read() << " bytes read)" << std::endl;
+                
+                // Layer 1
+                std::cout << "Reading Layer 1..." << std::endl;
+                uint32_t l1_hash = read_section();
+                std::cout << "  Section hash: 0x" << std::hex << l1_hash << std::dec << std::endl;
+                
+                reader.read_int32_array(layer1_biases, LAYER1_OUTPUT);
+                
+                for (int i = 0; i < LAYER1_OUTPUT; i++) {
+                    for (int j = 0; j < LAYER1_INPUT; j++) {
+                        layer1_weights[j][i] = static_cast<int8_t>(reader.read_int());
+                    }
+                }
+                std::cout << "  Complete" << std::endl;
+                
+                // Layer 2
+                std::cout << "Reading Layer 2..." << std::endl;
+                uint32_t l2_hash = read_section();
+                std::cout << "  Section hash: 0x" << std::hex << l2_hash << std::dec << std::endl;
+                
+                reader.read_int32_array(layer2_biases, LAYER2_OUTPUT);
+                
+                for (int i = 0; i < LAYER2_OUTPUT; i++) {
+                    for (int j = 0; j < LAYER2_INPUT; j++) {
+                        layer2_weights[j][i] = static_cast<int8_t>(reader.read_int());
+                    }
+                }
+                std::cout << "  Complete" << std::endl;
+                
+                // Output Layer
+                std::cout << "Reading Output Layer..." << std::endl;
+                uint32_t out_hash = read_section();
+                std::cout << "  Section hash: 0x" << std::hex << out_hash << std::dec << std::endl;
+                
+                output_bias = reader.read_int();
+                reader.read_int8_array(output_weights, LAYER2_OUTPUT);
+                std::cout << "  Complete" << std::endl;
+                
+                std::cout << "\nTotal bytes decompressed: " << reader.get_bytes_read() << std::endl;
+                
+            } else {
+                // ===== UNCOMPRESSED FORMAT (RAW BINARY) =====
+                std::cout << "\n--- Reading Raw Binary Data ---" << std::endl;
+                
+                // Feature Transformer
+                std::cout << "Reading Feature Transformer..." << std::endl;
+                uint32_t ft_hash = read_section();
+                
+                file.read(reinterpret_cast<char*>(feature_biases),
+                          FEATURE_TRANSFORMER_OUTPUT * sizeof(int16_t));
+                
+                if (!file.good()) {
+                    throw std::runtime_error("Failed to read feature biases");
+                }
+                
+                file.read(reinterpret_cast<char*>(feature_weights),
+                          FEATURE_TRANSFORMER_INPUT * FEATURE_TRANSFORMER_OUTPUT * sizeof(int16_t));
+                
+                if (!file.good()) {
+                    throw std::runtime_error("Failed to read feature weights");
+                }
+                
+                std::cout << "  Complete ("
+                          << (FEATURE_TRANSFORMER_INPUT * FEATURE_TRANSFORMER_OUTPUT * sizeof(int16_t))
+                          << " bytes)" << std::endl;
+                
+                // Layer 1
+                std::cout << "Reading Layer 1..." << std::endl;
+                uint32_t l1_hash = read_section();
+                
+                file.read(reinterpret_cast<char*>(layer1_biases),
+                          LAYER1_OUTPUT * sizeof(int32_t));
+                file.read(reinterpret_cast<char*>(layer1_weights),
+                          LAYER1_INPUT * LAYER1_OUTPUT * sizeof(int8_t));
+                
+                if (!file.good()) {
+                    throw std::runtime_error("Failed to read layer 1");
+                }
+                std::cout << "  Complete" << std::endl;
+                
+                // Layer 2
+                std::cout << "Reading Layer 2..." << std::endl;
+                uint32_t l2_hash = read_section();
+                
+                file.read(reinterpret_cast<char*>(layer2_biases),
+                          LAYER2_OUTPUT * sizeof(int32_t));
+                file.read(reinterpret_cast<char*>(layer2_weights),
+                          LAYER2_INPUT * LAYER2_OUTPUT * sizeof(int8_t));
+                
+                if (!file.good()) {
+                    throw std::runtime_error("Failed to read layer 2");
+                }
+                std::cout << "  Complete" << std::endl;
+                
+                // Output Layer
+                std::cout << "Reading Output Layer..." << std::endl;
+                uint32_t out_hash = read_section();
+                
+                file.read(reinterpret_cast<char*>(&output_bias), sizeof(int32_t));
+                file.read(reinterpret_cast<char*>(output_weights),
+                          LAYER2_OUTPUT * sizeof(int8_t));
+                
+                if (!file.good()) {
+                    throw std::runtime_error("Failed to read output layer");
+                }
+                std::cout << "  Complete" << std::endl;
+            }
+            
+        } catch (const std::exception& e) {
+            std::cerr << "ERROR: " << e.what() << std::endl;
+            file.close();
+            return false;
+        }
         
         file.close();
         
-        std::cout << "NNUE weights loaded successfully!" << std::endl;
+        // Validate weights
+        std::cout << "\n--- Validation ---" << std::endl;
+        std::cout << "Sample feature_biases[0]: " << feature_biases[0] << std::endl;
+        std::cout << "Sample feature_biases[1]: " << feature_biases[1] << std::endl;
+        std::cout << "Sample feature_biases[255]: " << feature_biases[255] << std::endl;
+        std::cout << "Sample feature_weights[0][0]: " << feature_weights[0][0] << std::endl;
+        std::cout << "Sample layer1_biases[0]: " << layer1_biases[0] << std::endl;
+        std::cout << "Sample output_bias: " << output_bias << std::endl;
+        
+        // Check for all-zero weights (corruption indicator)
+        int non_zero_count = 0;
+        for (int i = 0; i < 100; i++) {
+            if (feature_biases[i] != 0) non_zero_count++;
+        }
+        
+        if (non_zero_count == 0) {
+            std::cerr << "WARNING: All sampled biases are zero - file may be corrupted!" << std::endl;
+            return false;
+        }
+        
+        std::cout << "\n✓ NNUE loaded successfully!" << std::endl;
+        std::cout << "========================\n" << std::endl;
+        
         nnue_loaded = true;
         return true;
     }
@@ -1009,19 +1251,30 @@ namespace NNUE {
     void init() {
         // Try multiple possible paths
         std::vector<std::string> paths = {
-            "nn-2962dca31855.nnue",
-            "C:\\Users\\chang\\Downloads\\Duchess\\nn-2962dca31855.nnue",
+            "nn-2962dca31855.nnue",                                    // Current directory (compressed)
+            "C:\\Users\\chang\\Downloads\\nn-2962dca31855.nnue",      // Downloads (compressed)
+            "raw_master.nnue",                                         // Current directory (uncompressed)
+            "C:\\Users\\chang\\Downloads\\raw_master.nnue",           // Downloads (uncompressed)
             "./nn-2962dca31855.nnue",
-            "../nn-2962dca31855.nnue"
+            "../nn-2962dca31855.nnue",
+            "C:\\Users\\chang\\Downloads\\Duchess\\nn-2962dca31855.nnue"
         };
         
+        std::cout << "Searching for NNUE file..." << std::endl;
+        
         for (const auto& path : paths) {
+            std::cout << "Trying: " << path << "..." << std::endl;
             if (load_nnue(path)) {
+                std::cout << "Successfully loaded from: " << path << std::endl;
                 return;
             }
         }
         
-        std::cout << "WARNING: NNUE file not found, using random weights (evaluation will be weak!)" << std::endl;
+        std::cout << "\n⚠ WARNING: No NNUE file found!" << std::endl;
+        std::cout << "Using random weights (evaluation will be weak)" << std::endl;
+        std::cout << "Download nn-2962dca31855.nnue from Stockfish and place it in:" << std::endl;
+        std::cout << "  - Current directory, or" << std::endl;
+        std::cout << "  - C:\\Users\\chang\\Downloads\\" << std::endl;
         
         // Fallback: Initialize with small random weights
         std::mt19937 rng(123456789);
@@ -1063,15 +1316,11 @@ namespace NNUE {
             output_weights[i] = static_cast<int8_t>(dist_layer(rng));
         }
         
-        nnue_loaded = false; // Mark as not properly loaded
+        nnue_loaded = false;
     }
     
     // Convert piece and square to feature index (HalfKAv2 format)
     inline int get_feature_index(int piece, int square, int king_square, bool white_perspective) {
-        // HalfKAv2: Features are relative to king position
-        // Format: [piece_type][king_square][piece_square]
-        
-        // Piece type (0-11: P,N,B,R,Q,K for both colors)
         int piece_type;
         if (piece >= W_PAWN && piece <= W_KING) {
             piece_type = piece - W_PAWN;
@@ -1081,34 +1330,28 @@ namespace NNUE {
             return -1;
         }
         
-        // For black's perspective, flip the board
         if (!white_perspective) {
-            square ^= 56; // Flip rank
+            square ^= 56;
             king_square ^= 56;
         }
         
-        // Calculate index: piece_type * 64 + square
         return piece_type * 64 + square;
     }
     
     // Refresh accumulator from scratch
     void refresh_accumulator(const Position& pos, Accumulator& acc) {
-        // Initialize with biases
         std::copy(std::begin(feature_biases), std::end(feature_biases), std::begin(acc.white));
         std::copy(std::begin(feature_biases), std::end(feature_biases), std::begin(acc.black));
         
-        // Get king squares
         int white_king_sq = lsb(pos.get_pieces(W_KING));
         int black_king_sq = lsb(pos.get_pieces(B_KING));
         
-        // Add all pieces to accumulator
         for (int piece = W_PAWN; piece <= B_KING; piece++) {
             Bitboard pieces = pos.get_pieces(piece);
             while (pieces) {
                 int sq = lsb(pieces);
                 pieces = clear_lsb(pieces);
                 
-                // Add to white's perspective
                 int idx_white = get_feature_index(piece, sq, white_king_sq, true);
                 if (idx_white >= 0 && idx_white < FEATURE_TRANSFORMER_INPUT) {
                     for (int j = 0; j < FEATURE_TRANSFORMER_OUTPUT; j++) {
@@ -1116,7 +1359,6 @@ namespace NNUE {
                     }
                 }
                 
-                // Add to black's perspective
                 int idx_black = get_feature_index(piece, sq, black_king_sq, false);
                 if (idx_black >= 0 && idx_black < FEATURE_TRANSFORMER_INPUT) {
                     for (int j = 0; j < FEATURE_TRANSFORMER_OUTPUT; j++) {
@@ -1129,43 +1371,38 @@ namespace NNUE {
         acc.computed = true;
     }
     
-    // ClippedReLU activation (used in Stockfish NNUE)
+    // ClippedReLU activation
     inline int32_t clipped_relu(int32_t x) {
         return std::max(0, std::min(127, x));
     }
     
     // Evaluate position using NNUE
     int evaluate(const Position& pos) {
-        // Create and refresh accumulator
         Accumulator acc;
         refresh_accumulator(pos, acc);
         
-        // Choose perspective based on side to move
         int16_t* our_acc = (pos.get_side_to_move() == WHITE) ? acc.white : acc.black;
         int16_t* their_acc = (pos.get_side_to_move() == WHITE) ? acc.black : acc.white;
         
-        // Layer 1: Process both perspectives
         alignas(64) int32_t layer1_output[LAYER1_OUTPUT];
         
         for (int i = 0; i < LAYER1_OUTPUT; i++) {
             int32_t sum = layer1_biases[i];
             
-            // Our perspective (first 256 inputs)
             for (int j = 0; j < FEATURE_TRANSFORMER_OUTPUT; j++) {
                 int32_t clipped = clipped_relu(our_acc[j]);
                 sum += clipped * layer1_weights[j][i];
             }
             
-            // Their perspective (next 256 inputs)
             for (int j = 0; j < FEATURE_TRANSFORMER_OUTPUT; j++) {
                 int32_t clipped = clipped_relu(their_acc[j]);
                 sum += clipped * layer1_weights[j + FEATURE_TRANSFORMER_OUTPUT][i];
             }
             
-            layer1_output[i] = clipped_relu(sum / WEIGHT_SCALE);
+            sum /= WEIGHT_SCALE;
+            layer1_output[i] = clipped_relu(sum);
         }
         
-        // Layer 2
         alignas(64) int32_t layer2_output[LAYER2_OUTPUT];
         
         for (int i = 0; i < LAYER2_OUTPUT; i++) {
@@ -1175,18 +1412,16 @@ namespace NNUE {
                 sum += layer1_output[j] * layer2_weights[j][i];
             }
             
-            layer2_output[i] = clipped_relu(sum / WEIGHT_SCALE);
+            sum /= WEIGHT_SCALE;
+            layer2_output[i] = clipped_relu(sum);
         }
         
-        // Output layer
         int32_t output = output_bias;
         
         for (int i = 0; i < LAYER2_OUTPUT; i++) {
             output += layer2_output[i] * output_weights[i];
         }
         
-        // Scale to centipawns
-        // Stockfish uses: output * 600 / (127 * OUTPUT_SCALE)
         int eval = (output * 600) / (127 * OUTPUT_SCALE);
         
         return eval;
