@@ -1946,6 +1946,9 @@ static int capture_history[13][64][13];  // [attacker][to][victim]
 // Global node counter
 static uint64_t nodes_searched = 0;
 
+// Global search control
+static bool search_stopped = false;
+
 // Move scoring for ordering with improved heuristics
 static int score_move(const Position& pos, const Move& move, int depth, const Move& tt_move = Move(), int ply = 0, const Move& prev_move = Move()) {
     int score = 0;
@@ -2538,41 +2541,42 @@ public:
         
         Move best_move;
         int best_score = 0;
-        int prev_score = 0;  // For aspiration windows
-        ::nodes_searched = 0;  // Initialize global node counter once
+        int prev_score = 0;
+        ::nodes_searched = 0;
         
-        // Search statistics
         uint64_t total_time = 0;
         int search_depth = 0;
         
         for (int depth = 1; depth <= max_depth; depth++) {
+            // Check if GUI requested stop
+            if (search_stopped) {
+                search_stopped = false;  // Reset flag
+                break;
+            }
+            
             auto current_time = std::chrono::high_resolution_clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 current_time - start_time).count();
             
-            if (elapsed >= time_limit_ms) {
+            // FIX: Only check time limit if it's not infinite (-1)
+            if (time_limit_ms > 0 && elapsed >= time_limit_ms) {
                 break;
             }
             
-            // Store nodes at start of depth
             uint64_t depth_nodes_start = nodes_searched;
             
             auto result = find_best_move(pos, depth, prev_score);
             Move current_best = result.first;
             int current_score = result.second;
             
-            // Store previous score for next iteration
             prev_score = current_score;
             
-            // Calculate statistics for this depth
             uint64_t depth_nodes = ::nodes_searched - depth_nodes_start;
             total_time = elapsed;
             search_depth = depth;
             
-            // Calculate nodes per second
             uint64_t nps = (elapsed > 0) ? (::nodes_searched * 1000 / elapsed) : 0;
             
-            // Output search info with detailed statistics
             std::cout << "info depth " << depth
                       << " score cp " << current_score
                       << " time " << elapsed
@@ -2580,7 +2584,6 @@ public:
                       << " nps " << nps
                       << " pv ";
             
-            // Output principal variation (simplified - just the best move)
             if (current_best.data != 0) {
                 char from_file = 'a' + file_of(current_best.from());
                 char from_rank = '1' + rank_of(current_best.from());
@@ -2597,15 +2600,16 @@ public:
             
             best_move = current_best;
             best_score = current_score;
+            
+            // For infinite search, continue until max_depth
+            // GUI will send "stop" command to interrupt
         }
         
-        // Output final search statistics
         std::cout << "info string Search completed: depth=" << search_depth
                   << " nodes=" << ::nodes_searched
                   << " time=" << total_time << "ms"
                   << " nps=" << (total_time > 0 ? (nodes_searched * 1000 / total_time) : 0) << "\n";
         
-        // Output best move
         std::cout << "bestmove ";
         if (best_move.data != 0) {
             char from_file = 'a' + file_of(best_move.from());
@@ -2737,6 +2741,8 @@ private:
                 }
             }
             else if (token == "go") {
+                search_stopped = false;  // Reset flag for new search
+                
                 // Parse go command
                 int depth = 8; // Default depth
                 int time = 900; // Default time in ms (1 second limit)
@@ -2779,6 +2785,7 @@ private:
                 break;
             }
             else if (token == "stop") {
+                search_stopped = true;  // Set flag
                 std::cout << "info string Search stopped\n";
             }
             else if (token == "perft") {
