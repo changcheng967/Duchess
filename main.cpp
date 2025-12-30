@@ -102,6 +102,7 @@ constexpr Bitboard SQ(int sq) { return 1ULL << sq; }
 #include <intrin.h>
 inline int popcount(Bitboard b) { return __popcnt64(b); }
 inline int lsb(Bitboard b) {
+    if (b == 0) return -1;
     unsigned long index;
     if (_BitScanForward64(&index, b)) return static_cast<int>(index);
     return -1;
@@ -1466,8 +1467,8 @@ namespace NNUE {
             output += layer2_output[i] * output_weights[i];
         }
         
-        // Scale output to centipawns (reduced from 600 to 400)
-        int eval = (output * 400) / (127 * OUTPUT_SCALE);
+        // Scale output to centipawns (CORRECTED: 400 → 100)
+        int eval = (output * 100) / (127 * OUTPUT_SCALE);
         
         // Apply game phase scaling
         int total_material = 0;
@@ -1477,10 +1478,13 @@ namespace NNUE {
             }
         }
         
-        // Reduce evaluation in endgames
-        if (total_material < 16) {
-            eval = (eval * (total_material + 16)) / 32;
+        // Gradual endgame scaling (starts earlier, more gradual)
+        if (total_material < 24) {
+            eval = (eval * (total_material + 24)) / 48;
         }
+        
+        // Clamp to prevent extreme values
+        eval = std::max(-3000, std::min(3000, eval));
         
         return eval;
     }
@@ -1891,10 +1895,10 @@ public:
 
 // Transposition Table with better memory management
 struct TTEntry {
-    Bitboard hash;
-    int depth;
-    int score;
-    int flag;  // 0=exact, 1=lower_bound, 2=upper_bound
+    Bitboard hash = 0;
+    int depth = 0;
+    int score = 0;
+    int flag = 0;  // 0=exact, 1=lower_bound, 2=upper_bound
     Move best_move;
 };
 
@@ -1930,8 +1934,13 @@ static int history_table[13][64][64];
 static uint64_t nodes_searched = 0;
 
 // Move scoring for ordering with improved heuristics
-static int score_move(const Position& pos, const Move& move, int depth) {
+static int score_move(const Position& pos, const Move& move, int depth, const Move& tt_move = Move()) {
     int score = 0;
+    
+    // TT move gets highest priority
+    if (move == tt_move) {
+        return 10000000;  // Highest score
+    }
     
     // MVV-LVA (Most Valuable Victim - Least Valuable Attacker)
     if (move.is_capture()) {
@@ -2312,7 +2321,7 @@ class Search {
 private:
     // Use global nodes_searched, no class static needed
     
-    static std::pair<Move, int> find_best_move(Position& pos, int depth) {
+    static std::pair<Move, int> find_best_move(Position& pos, int depth, int prev_score = 0) {
         auto moves = pos.generate_legal_moves();
         if (moves.empty()) {
             return {Move(), -1000000};
@@ -2321,29 +2330,68 @@ private:
         Move best_move = moves[0];
         int best_score = -1000000;
         
-        for (const auto& move : moves) {
-            Position temp_pos = pos; // Create copy to avoid modifying original
-            if (!temp_pos.make_move(move)) continue;
+        // Aspiration windows for depth > 3
+        if (depth > 3 && prev_score != 0) {
+            int window = 50;
+            int alpha = prev_score - window;
+            int beta = prev_score + window;
             
-            // Use the class static member for node counting
-            int score = -alpha_beta(temp_pos, depth - 1, -1000000, 1000000);
-            
-            // Better move selection: prefer captures and center control
-            if (score > best_score) {
-                best_score = score;
-                best_move = move;
-            } else if (score == best_score) {
-                // Tie-breaking: prefer captures, then center moves
-                if (move.is_capture() && !best_move.is_capture()) {
-                    best_score = score;
-                    best_move = move;
-                } else if (!move.is_capture() && !best_move.is_capture()) {
-                    // Prefer center pawn moves
-                    int to_file = file_of(best_move.to());
-                    int best_to_file = file_of(best_move.to());
-                    if ((to_file == 3 || to_file == 4) && (best_to_file != 3 && best_to_file != 4)) {
+            while (true) {
+                best_score = -1000000;
+                
+                for (const auto& move : moves) {
+                    Position temp_pos = pos;
+                    if (!temp_pos.make_move(move)) continue;
+                    
+                    int score = -alpha_beta(temp_pos, depth - 1, -beta, -alpha);
+                    
+                    if (score > best_score) {
                         best_score = score;
                         best_move = move;
+                    }
+                }
+                
+                // Check if we need to re-search
+                if (best_score <= alpha) {
+                    alpha -= window;
+                    window *= 2;
+                } else if (best_score >= beta) {
+                    beta += window;
+                    window *= 2;
+                } else {
+                    break;  // Success!
+                }
+                
+                // Fallback to full window if aspiration fails
+                if (window > 500) {
+                    alpha = -1000000;
+                    beta = 1000000;
+                }
+            }
+        } else {
+            // Full window for shallow depths
+            for (const auto& move : moves) {
+                Position temp_pos = pos;
+                if (!temp_pos.make_move(move)) continue;
+                
+                int score = -alpha_beta(temp_pos, depth - 1, -1000000, 1000000);
+                
+                if (score > best_score) {
+                    best_score = score;
+                    best_move = move;
+                } else if (score == best_score) {
+                    // Tie-breaking: prefer captures, then center moves
+                    if (move.is_capture() && !best_move.is_capture()) {
+                        best_score = score;
+                        best_move = move;
+                    } else if (!move.is_capture() && !best_move.is_capture()) {
+                        // Prefer center pawn moves
+                        int to_file = file_of(best_move.to());
+                        int best_to_file = file_of(best_move.to());
+                        if ((to_file == 3 || to_file == 4) && (best_to_file != 3 && best_to_file != 4)) {
+                            best_score = score;
+                            best_move = move;
+                        }
                     }
                 }
             }
@@ -2367,6 +2415,7 @@ public:
         
         Move best_move;
         int best_score = 0;
+        int prev_score = 0;  // For aspiration windows
         ::nodes_searched = 0;  // Initialize global node counter once
         
         // Search statistics
@@ -2385,9 +2434,12 @@ public:
             // Store nodes at start of depth
             uint64_t depth_nodes_start = nodes_searched;
             
-            auto result = find_best_move(pos, depth);
+            auto result = find_best_move(pos, depth, prev_score);
             Move current_best = result.first;
             int current_score = result.second;
+            
+            // Store previous score for next iteration
+            prev_score = current_score;
             
             // Calculate statistics for this depth
             uint64_t depth_nodes = ::nodes_searched - depth_nodes_start;
