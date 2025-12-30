@@ -2293,14 +2293,7 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta, int ply = 0
     
     int moves_searched = 0;
     
-    // Score and sort moves normally
-    std::vector<std::pair<Move, int>> scored_moves;
-    scored_moves.reserve(moves.size());
-    for (const auto& move : moves) {
-        scored_moves.emplace_back(move, score_move(pos, move, depth, tt_move, ply));
-    }
-    std::sort(scored_moves.begin(), scored_moves.end(),
-              [](const auto& a, const auto& b) { return a.second > b.second; });
+    // Moves already scored and sorted above
     
     for (const auto& scored_move : scored_moves) {
         const Move& move = scored_move.first;
