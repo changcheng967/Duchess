@@ -2115,7 +2115,7 @@ static int quiescence(Position& pos, int alpha, int beta, int ply = 0) {
             }
         }
         
-        scored_moves.emplace_back(move, score_move(pos, move, 0));
+        scored_moves.emplace_back(move, score_move(pos, move, 0, Move(), ply));
     }
     
     // Sort captures by score (best first)
@@ -2785,6 +2785,9 @@ private:
             else if (token == "quit") {
                 break;
             }
+            else if (token == "stop") {
+                std::cout << "info string Search stopped\n";
+            }
             else if (token == "perft") {
                 int depth;
                 ss >> depth;
@@ -2795,6 +2798,54 @@ private:
                 auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
                 
                 std::cout << "Perft depth " << depth << ": " << nodes << " nodes in " << duration.count() << "ms\n";
+            }
+            else if (token == "test") {
+                Perft::run_test_suite();
+            }
+            else if (token == "debug") {
+                // Debug command to show current position
+                current_position.print();
+                std::cout << "info string Position hash: 0x" << std::hex << current_position.get_hash() << std::dec << "\n";
+                std::cout << "info string Castling rights: " << current_position.get_castling_rights() << "\n";
+                std::cout << "info string En passant: " << current_position.get_en_passant_square() << "\n";
+            }
+            else if (token == "eval") {
+                // Evaluate current position
+                int score = current_position.evaluate();
+                std::cout << "info string Evaluation: " << score << " centipawns\n";
+            }
+            else if (token == "moves") {
+                // List all legal moves
+                auto moves = current_position.generate_legal_moves();
+                std::cout << "info string Legal moves (" << moves.size() << "): ";
+                for (const auto& move : moves) {
+                    char from_file = 'a' + file_of(move.from());
+                    char from_rank = '1' + rank_of(move.from());
+                    char to_file = 'a' + file_of(move.to());
+                    char to_rank = '1' + rank_of(move.to());
+                    std::cout << from_file << from_rank << to_file << to_rank << " ";
+                }
+                std::cout << "\n";
+            }
+            else if (token == "help") {
+                std::cout << "Available commands:\n";
+                std::cout << "  uci              - Initialize UCI protocol\n";
+                std::cout << "  isready          - Check if engine is ready\n";
+                std::cout << "  ucinewgame       - Reset to starting position\n";
+                std::cout << "  position fen ... - Set position from FEN\n";
+                std::cout << "  position startpos [moves ...] - Set starting position with moves\n";
+                std::cout << "  go [depth N] [wtime N] [btime N] - Start search\n";
+                std::cout << "  perft N          - Run perft test to depth N\n";
+                std::cout << "  test             - Run perft test suite\n";
+                std::cout << "  debug            - Show debug information\n";
+                std::cout << "  eval             - Evaluate current position\n";
+                std::cout << "  moves            - List all legal moves\n";
+                std::cout << "  quit             - Exit engine\n";
+            }
+            else if (!token.empty() && token[0] != '#') {
+                // Unknown command
+                std::cout << "info string Unknown command: " << token << "\n";
+                std::cout << "info string Type 'help' for available commands\n";
             }
             else if (token == "test") {
                 Perft::run_test_suite();
