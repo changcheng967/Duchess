@@ -743,23 +743,21 @@ std::vector<Move> Position::generate_legal_moves() const {
     }
     int king_sq = lsb(king_bb);
     
+    // Use make_move/undo_move to avoid expensive copying
+    // Cast to non-const to use make/undo safely
+    Position& mutable_pos = const_cast<Position&>(*this);
+    
     for (const auto& move : pseudo_legal) {
-        // Create a lightweight copy for validation
-        Position temp = *this;
-        
-        // Make the move
-        if (!temp.make_move(move)) continue;
-        
-        // Find king position after move (might have moved)
-        Bitboard new_king_bb = temp.pieces[king_piece];
-        if (new_king_bb == 0) continue; // King captured (invalid)
-        
-        int new_king_sq = lsb(new_king_bb);
-        
-        // Check if king is attacked AFTER the move
-        // This is the correct way to check legality
-        if (!temp.is_square_attacked(new_king_sq, 1 - our_color)) {
-            legal.push_back(move);
+        if (mutable_pos.make_move(move)) {
+            int new_king_sq = lsb(mutable_pos.pieces[king_piece]);
+            
+            // Check if king is attacked AFTER the move
+            if (!mutable_pos.is_square_attacked(new_king_sq, 1 - our_color)) {
+                legal.push_back(move);
+            }
+            
+            // Undo the move
+            mutable_pos.undo_move(move);
         }
     }
     
@@ -862,6 +860,9 @@ void Position::from_fen(const std::string& fen) {
     // Update hash for side and castling
     if (side_to_move == BLACK) hash ^= zobrist.hash_side();
     hash ^= zobrist.hash_castling(castling_rights);
+    
+    // Initialize NNUE accumulator for new position
+    accumulator_valid = false;
 }
 
 std::string Position::to_fen() const {
@@ -1383,20 +1384,28 @@ namespace NNUE {
     
     // Convert piece and square to feature index (HalfKAv2 format)
     inline int get_feature_index(int piece, int square, int king_square, bool white_perspective) {
-        // Extract piece type (0-5) and color (0-1)
-        int piece_type = (piece - 1) % 6;  // 0=pawn, 1=knight, 2=bishop, 3=rook, 4=queen, 5=king
-        int piece_color = (piece <= W_KING) ? WHITE : BLACK;
-        
-        // Flip perspective for black
-        if (!white_perspective) {
-            square ^= 56;       // Flip piece square vertically
-            king_square ^= 56;  // Flip king square vertically
-            piece_color ^= 1;   // Flip piece color
+        // Validate inputs
+        if (piece < W_PAWN || piece > B_KING) {
+            return 0; // Safe fallback
+        }
+        if (square < 0 || square >= 64) {
+            return 0; // Safe fallback
         }
         
-        // Stockfish HalfKAv2_hm formula:
-        // index = piece_color * 6 * 64 + piece_type * 64 + square
-        return piece_color * 384 + piece_type * 64 + square;
+        // Map pieces to 0-11: White (P,N,B,R,Q,K) -> 0-5, Black (p,n,b,r,q,k) -> 6-11
+        int p_idx;
+        if (white_perspective) {
+            p_idx = (piece <= W_KING) ? (piece - 1) : (piece - B_PAWN + 6);
+        } else {
+            // Flip square for black's perspective
+            square ^= 56;
+            // Swap piece color mapping for black
+            p_idx = (piece >= B_PAWN) ? (piece - B_PAWN) : (piece - 1 + 6);
+        }
+        
+        // Ensure the index is always within bounds [0, 767]
+        int final_idx = p_idx * 64 + square;
+        return (final_idx >= 0 && final_idx < FEATURE_TRANSFORMER_INPUT) ? final_idx : 0;
     }
     
     // Refresh accumulator from scratch
@@ -1407,11 +1416,18 @@ namespace NNUE {
         int white_king_sq = lsb(pos.get_pieces(W_KING));
         int black_king_sq = lsb(pos.get_pieces(B_KING));
         
+        // Validate king squares
+        if (white_king_sq < 0 || white_king_sq >= 64) white_king_sq = 4;  // e1
+        if (black_king_sq < 0 || black_king_sq >= 64) black_king_sq = 60; // e8
+        
         for (int piece = W_PAWN; piece <= B_KING; piece++) {
             Bitboard pieces = pos.get_pieces(piece);
             while (pieces) {
                 int sq = lsb(pieces);
                 pieces = clear_lsb(pieces);
+                
+                // Validate square
+                if (sq < 0 || sq >= 64) continue;
                 
                 int idx_white = get_feature_index(piece, sq, white_king_sq, true);
                 if (idx_white >= 0 && idx_white < FEATURE_TRANSFORMER_INPUT) {
@@ -2171,17 +2187,19 @@ static int quiescence(Position& pos, int alpha, int beta, int ply = 0) {
     for (const auto& scored_move : scored_moves) {
         const Move& move = scored_move.first;
         
-        // Make move on current position
-        if (!pos.make_move(move)) continue;
+        // Create a copy of the position for the recursive search
+        // This prevents infinite recursion and stack corruption
+        Position temp_pos = pos;
+        
+        // Make move on the copy
+        if (!temp_pos.make_move(move)) continue;
         
         // Legality check: ensure our king is not in check
-        Bitboard king_bb = pos.pieces[king_piece];
+        Bitboard king_bb = temp_pos.pieces[king_piece];
         if (king_bb == 0) continue; // King captured
         
         int king_sq = lsb(king_bb);
-        if (pos.is_square_attacked(king_sq, 1 - our_color)) {
-            // Undo the illegal move
-            pos.undo_move(move);
+        if (temp_pos.is_square_attacked(king_sq, 1 - our_color)) {
             continue; // Illegal move - king in check
         }
         
@@ -2190,10 +2208,8 @@ static int quiescence(Position& pos, int alpha, int beta, int ply = 0) {
             continue;
         }
         
-        int score_after = -quiescence(pos, -beta, -alpha, ply + 1);
-        
-        // Undo move after search
-        pos.undo_move(move);
+        // Search the copy (no need to undo since we're using a copy)
+        int score_after = -quiescence(temp_pos, -beta, -alpha, ply + 1);
         
         if (score_after >= beta) return beta;
         if (score_after > alpha) alpha = score_after;
@@ -2350,21 +2366,21 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta, int ply = 0
     for (const auto& scored_move : scored_moves) {
         const Move& move = scored_move.first;
         
-        // Make move on current position
-        if (!pos.make_move(move)) continue;
+        // Create a copy of the position for the recursive search
+        // This prevents infinite recursion and stack corruption
+        Position temp_pos = pos;
+        
+        // Make move on the copy
+        if (!temp_pos.make_move(move)) continue;
         
         // Legality check: ensure our king is not in check
-        Bitboard king_bb = pos.pieces[king_piece];
+        Bitboard king_bb = temp_pos.pieces[king_piece];
         if (king_bb == 0) {
-            // Undo illegal move
-            pos.undo_move(move);
             continue; // King captured
         }
         
         int king_sq = lsb(king_bb);
-        if (pos.is_square_attacked(king_sq, 1 - our_color)) {
-            // Undo illegal move
-            pos.undo_move(move);
+        if (temp_pos.is_square_attacked(king_sq, 1 - our_color)) {
             continue; // Illegal move - king in check
         }
         
@@ -2375,7 +2391,7 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta, int ply = 0
         // ===== LATE MOVE REDUCTIONS =====
         if (moves_searched > 3 && depth >= 3 &&
             !move.is_capture() && !move.is_promotion() &&
-            !pos.is_check() && !pos.is_check()) {
+            !temp_pos.is_check() && !temp_pos.is_check()) {
             
             // Calculate reduction
             int reduction = 1;
@@ -2386,33 +2402,24 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta, int ply = 0
             // Ensure we don't reduce below depth 1
             reduction = std::min(reduction, depth - 2);
             
-            // Search with reduced depth
-            score_after = -alpha_beta(pos, depth - 1 - reduction, -alpha - 1, -alpha, ply + 1);
+            // Search with reduced depth on the copy
+            score_after = -alpha_beta(temp_pos, depth - 1 - reduction, -alpha - 1, -alpha, ply + 1);
             
             // If it fails high, re-search at full depth
             if (score_after > alpha) {
-                score_after = -alpha_beta(pos, depth - 1, -beta, -alpha, ply + 1);
+                score_after = -alpha_beta(temp_pos, depth - 1, -beta, -alpha, ply + 1);
             }
-            
-            // Undo move after search
-            pos.undo_move(move);
         } else if (moves_searched == 1) {
             // Full window search for first move
-            score_after = -alpha_beta(pos, depth - 1, -beta, -alpha, ply + 1);
-            
-            // Undo move after search
-            pos.undo_move(move);
+            score_after = -alpha_beta(temp_pos, depth - 1, -beta, -alpha, ply + 1);
         } else {
             // Null window search (PVS)
-            score_after = -alpha_beta(pos, depth - 1, -alpha - 1, -alpha, ply + 1);
+            score_after = -alpha_beta(temp_pos, depth - 1, -alpha - 1, -alpha, ply + 1);
             
             // Re-search if it beats alpha
             if (score_after > alpha && score_after < beta) {
-                score_after = -alpha_beta(pos, depth - 1, -beta, -alpha, ply + 1);
+                score_after = -alpha_beta(temp_pos, depth - 1, -beta, -alpha, ply + 1);
             }
-            
-            // Undo move after search
-            pos.undo_move(move);
         }
         
         if (score_after > best_score) {
@@ -2611,19 +2618,6 @@ public:
                 pv_table[i][j] = Move();
             }
         }
-        
-        // ===== FIX: Initialize countermove table =====
-        for (int p = 0; p < 13; p++) {
-            for (int sq = 0; sq < 64; sq++) {
-                countermove_table[p][sq] = Move();
-            }
-        }
-        
-        // ===== FIX: Initialize continuation history =====
-        std::fill_n(&continuation_history[0][0][0][0], 13 * 64 * 13 * 64, 0);
-        
-        // ===== FIX: Initialize capture history =====
-        std::fill_n(&capture_history[0][0][0], 13 * 64 * 13, 0);
         
         // ===== FIX: Initialize countermove table =====
         for (int p = 0; p < 13; p++) {
