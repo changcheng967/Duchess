@@ -1986,7 +1986,8 @@ static int score_move(const Position& pos, const Move& move, int depth, const Mo
     int score = 0;
     
     // PV move gets highest priority (after TT move)
-    if (ply < pv_length[0] && move == pv_table[0][ply]) {
+    // Only check if we have valid PV data
+    if (ply >= 0 && ply < 100 && pv_length[0] > ply && move == pv_table[0][ply]) {
         return 20000000;  // Highest priority after TT
     }
     
@@ -2203,6 +2204,11 @@ static int quiescence(Position& pos, int alpha, int beta, int ply = 0) {
 
 // Alpha-beta search with optimizations
 static int alpha_beta(Position& pos, int depth, int alpha, int beta, int ply = 0) {
+    // GUARD: Prevent stack overflow from negative depth recursion (e.g. from LMR)
+    if (depth <= 0) {
+        return quiescence(pos, alpha, beta, ply);
+    }
+    
     nodes_searched++;
     
     // Reverse Futility Pruning
@@ -2414,12 +2420,18 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta, int ply = 0
             best_move = move;
             
             // Store PV
-            if (ply < 99) {
+            if (ply >= 0 && ply < 99) {
                 pv_table[ply][0] = move;
-                for (int i = 0; i < pv_length[ply + 1]; i++) {
-                    pv_table[ply][i + 1] = pv_table[ply + 1][i];
+                // Copy PV from next ply, with bounds checking
+                int next_ply = ply + 1;
+                if (next_ply < 100 && pv_length[next_ply] > 0) {
+                    for (int i = 0; i < pv_length[next_ply] && i < 99; i++) {
+                        pv_table[ply][i + 1] = pv_table[next_ply][i];
+                    }
+                    pv_length[ply] = std::min(pv_length[next_ply] + 1, 100);
+                } else {
+                    pv_length[ply] = 1;
                 }
-                pv_length[ply] = pv_length[ply + 1] + 1;
             }
             
             if (score_after > alpha) {
@@ -2433,19 +2445,8 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta, int ply = 0
                 killer_moves[1][depth] = killer_moves[0][depth];
                 killer_moves[0][depth] = move;
                 
-                // ===== FIX: Only update countermove if we have valid previous move =====
-                if (ply > 0 && ply < 100 && pv_length[0] > ply - 1) {
-                    Move prev_move = pv_table[0][ply - 1];
-                    if (prev_move.data != 0) {
-                        int prev_to = prev_move.to();
-                        if (prev_to >= 0 && prev_to < 64) {
-                            int prev_piece = pos.get_piece_at(prev_to);
-                            if (prev_piece >= 1 && prev_piece <= 12) {
-                                countermove_table[prev_piece][prev_to] = move;
-                            }
-                        }
-                    }
-                }
+                // Store killer move only (disable countermove/continuation history for now)
+                // to prevent access violations from invalid pv_table lookups
             }
             
             // Update history heuristic
@@ -2457,19 +2458,8 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta, int ply = 0
                 if (from >= 0 && from < 64 && to >= 0 && to < 64) {
                     history_table[piece][from][to] += depth * depth;
                     
-                    // ===== FIX: Only update continuation history if we have valid previous move =====
-                    if (ply > 0 && ply < 100 && pv_length[0] > ply - 1) {
-                        Move prev_move = pv_table[0][ply - 1];
-                        if (prev_move.data != 0) {
-                            int prev_to = prev_move.to();
-                            if (prev_to >= 0 && prev_to < 64) {
-                                int prev_piece = pos.get_piece_at(prev_to);
-                                if (prev_piece >= 1 && prev_piece <= 12) {
-                                    continuation_history[prev_piece][prev_to][piece][to] += depth * depth;
-                                }
-                            }
-                        }
-                    }
+                    // Continuation history disabled to prevent access violations
+                    // from invalid pv_table lookups
                     
                     // Update capture history
                     if (move.is_capture()) {
@@ -2621,6 +2611,19 @@ public:
                 pv_table[i][j] = Move();
             }
         }
+        
+        // ===== FIX: Initialize countermove table =====
+        for (int p = 0; p < 13; p++) {
+            for (int sq = 0; sq < 64; sq++) {
+                countermove_table[p][sq] = Move();
+            }
+        }
+        
+        // ===== FIX: Initialize continuation history =====
+        std::fill_n(&continuation_history[0][0][0][0], 13 * 64 * 13 * 64, 0);
+        
+        // ===== FIX: Initialize capture history =====
+        std::fill_n(&capture_history[0][0][0], 13 * 64 * 13, 0);
         
         // ===== FIX: Initialize countermove table =====
         for (int p = 0; p < 13; p++) {
