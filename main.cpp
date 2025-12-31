@@ -2433,38 +2433,59 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta, int ply = 0
                 killer_moves[1][depth] = killer_moves[0][depth];
                 killer_moves[0][depth] = move;
                 
-                // Update countermove
-                if (ply > 0) {
-                    int prev_piece = pos.get_piece_at(pv_table[0][ply - 1].to());
-                    countermove_table[prev_piece][pv_table[0][ply - 1].to()] = move;
+                // ===== FIX: Only update countermove if we have valid previous move =====
+                if (ply > 0 && ply < 100 && pv_length[0] > ply - 1) {
+                    Move prev_move = pv_table[0][ply - 1];
+                    if (prev_move.data != 0) {
+                        int prev_to = prev_move.to();
+                        if (prev_to >= 0 && prev_to < 64) {
+                            int prev_piece = pos.get_piece_at(prev_to);
+                            if (prev_piece >= 1 && prev_piece <= 12) {
+                                countermove_table[prev_piece][prev_to] = move;
+                            }
+                        }
+                    }
                 }
             }
             
             // Update history heuristic
             int piece = pos.get_piece_at(move.from());
             if (piece >= 1 && piece <= 12) {
-                history_table[piece][move.from()][move.to()] += depth * depth;
+                int from = move.from();
+                int to = move.to();
                 
-                // Update continuation history
-                if (ply > 0) {
-                    int prev_piece = pos.get_piece_at(pv_table[0][ply - 1].to());
-                    continuation_history[prev_piece][pv_table[0][ply - 1].to()][piece][move.to()] += depth * depth;
-                }
-                
-                // Update capture history
-                if (move.is_capture()) {
-                    int victim = pos.get_piece_at(move.to());
-                    if (victim >= 1 && victim <= 12) {
-                        capture_history[piece][move.to()][victim] += depth * depth;
+                if (from >= 0 && from < 64 && to >= 0 && to < 64) {
+                    history_table[piece][from][to] += depth * depth;
+                    
+                    // ===== FIX: Only update continuation history if we have valid previous move =====
+                    if (ply > 0 && ply < 100 && pv_length[0] > ply - 1) {
+                        Move prev_move = pv_table[0][ply - 1];
+                        if (prev_move.data != 0) {
+                            int prev_to = prev_move.to();
+                            if (prev_to >= 0 && prev_to < 64) {
+                                int prev_piece = pos.get_piece_at(prev_to);
+                                if (prev_piece >= 1 && prev_piece <= 12) {
+                                    continuation_history[prev_piece][prev_to][piece][to] += depth * depth;
+                                }
+                            }
+                        }
                     }
-                }
-                
-                // Age history table to prevent overflow
-                if (history_table[piece][move.from()][move.to()] > 10000) {
-                    for (int p = 1; p <= 12; p++) {
-                        for (int f = 0; f < 64; f++) {
-                            for (int t = 0; t < 64; t++) {
-                                history_table[p][f][t] /= 2;
+                    
+                    // Update capture history
+                    if (move.is_capture()) {
+                        int victim = pos.get_piece_at(to);
+                        if (victim >= 1 && victim <= 12) {
+                            capture_history[piece][to][victim] += depth * depth;
+                        }
+                    }
+                    
+                    // Age history table to prevent overflow
+                    if (history_table[piece][from][to] > 10000) {
+                        for (int p = 1; p <= 12; p++) {
+                            for (int f = 0; f < 64; f++) {
+                                for (int t = 0; t < 64; t++) {
+                                    history_table[p][f][t] /= 2;
+                                }
                             }
                         }
                     }
@@ -2587,10 +2608,32 @@ public:
     // Initialize search components
     static void init() {
         init_transposition_table(16); // 16MB default
+        
         // Clear killer moves and history
         std::fill_n(killer_moves[0], 100, Move());
         std::fill_n(killer_moves[1], 100, Move());
         std::fill_n(&history_table[0][0][0], 13 * 64 * 64, 0);
+        
+        // ===== FIX: Initialize PV table and lengths =====
+        for (int i = 0; i < 100; i++) {
+            pv_length[i] = 0;
+            for (int j = 0; j < 100; j++) {
+                pv_table[i][j] = Move();
+            }
+        }
+        
+        // ===== FIX: Initialize countermove table =====
+        for (int p = 0; p < 13; p++) {
+            for (int sq = 0; sq < 64; sq++) {
+                countermove_table[p][sq] = Move();
+            }
+        }
+        
+        // ===== FIX: Initialize continuation history =====
+        std::fill_n(&continuation_history[0][0][0][0], 13 * 64 * 13 * 64, 0);
+        
+        // ===== FIX: Initialize capture history =====
+        std::fill_n(&capture_history[0][0][0], 13 * 64 * 13, 0);
     }
     
     static void iterative_deepening(Position& pos, int max_depth, int time_limit_ms) {
