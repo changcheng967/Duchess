@@ -117,7 +117,7 @@ inline int popcount(Bitboard b) { return __builtin_popcountll(b); }
 inline int lsb(Bitboard b) { return __builtin_ctzll(b); }
 inline int msb(Bitboard b) { return 63 - __builtin_clzll(b); }
 #endif
-constexpr Bitboard clear_lsb(Bitboard b) { return b & (b - 1); }
+constexpr Bitboard clear_lsb(Bitboard b) { return b & (b - 1ULL); }
 
 // File and rank extraction
 constexpr int file_of(int sq) { return sq & 7; }
@@ -420,6 +420,16 @@ public:
     // Move history for undo
     std::vector<UndoInfo> history;
     
+    // NNUE accumulator for incremental evaluation
+    // Note: NNUE namespace is defined later, so we'll use forward declaration
+    struct Accumulator {
+        alignas(64) int16_t white[256];
+        alignas(64) int16_t black[256];
+        bool computed;
+    };
+    Accumulator accumulator;
+    bool accumulator_valid;
+    
 private:
     
     // Update hash when piece moves
@@ -514,6 +524,10 @@ public:
         }
         return EMPTY;
     }
+    
+    // NNUE incremental evaluation methods
+    void update_nnue_incremental(const Move& move);
+    int evaluate_nnue() const;
 };
 
 // ==================== MOVE GENERATION ====================
@@ -755,10 +769,12 @@ std::vector<Move> Position::generate_legal_moves() const {
 // ==================== POSITION IMPLEMENTATION ====================
 
 Position::Position() {
+    accumulator_valid = false;
     from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
 }
 
 Position::Position(const std::string& fen) {
+    accumulator_valid = false;
     from_fen(fen);
 }
 
@@ -1672,6 +1688,9 @@ bool Position::make_move(const Move& move) {
     // Store undo info
     history.push_back(undo);
     
+    // Update NNUE accumulator incrementally
+    update_nnue_incremental(move);
+    
     return true;
 }
 
@@ -1766,6 +1785,19 @@ void Position::undo_move(const Move& move) {
     // Update occupancy
     update_occupancy();
 }
+
+// Incremental NNUE accumulator update
+void Position::update_nnue_incremental(const Move& move) {
+    // For now, just mark accumulator as invalid to use classical evaluation
+    // This is a simplified implementation - full incremental NNUE would require
+    // the complete NNUE namespace to be available
+    accumulator_valid = false;
+}
+
+// REMOVED - Not needed anymore
+// int Position::evaluate_nnue() const {
+//     return evaluate();  // ← This was the bug!
+// }
 
 // ==================== GAME STATE CHECKS ====================
 
@@ -1963,13 +1995,14 @@ static int score_move(const Position& pos, const Move& move, int depth, const Mo
         return 10000000;  // Highest score
     }
     
-    // Countermove bonus
-    if (ply > 0 && prev_move.data != 0) {
-        int prev_piece = pos.get_piece_at(prev_move.to());
-        if (move == countermove_table[prev_piece][prev_move.to()]) {
-            score += 600000;
-        }
-    }
+    // Countermove bonus - DISABLED for now to prevent access violations
+    // This would require tracking previous move piece in parent position
+    // if (ply > 0 && prev_move.data != 0) {
+    //     int prev_piece = pos.get_piece_at(prev_move.to());
+    //     if (move == countermove_table[prev_piece][prev_move.to()]) {
+    //         score += 600000;
+    //     }
+    // }
     
     // MVV-LVA (Most Valuable Victim - Least Valuable Attacker)
     if (move.is_capture()) {
@@ -2028,11 +2061,17 @@ static int score_move(const Position& pos, const Move& move, int depth, const Mo
     if (piece >= 1 && piece <= 12) {
         score += history_table[piece][move.from()][move.to()] * (depth + 1);
         
-        // Continuation history bonus
-        if (ply > 0 && prev_move.data != 0) {
-            int prev_piece = pos.get_piece_at(prev_move.to());
-            score += continuation_history[prev_piece][prev_move.to()][piece][move.to()];
-        }
+        // Continuation history bonus - DISABLED for now to prevent access violations
+        // This would require tracking previous move piece in parent position
+        // if (ply > 0 && prev_move.data != 0) {
+        //     int to_sq = prev_move.to();
+        //     if (to_sq >= 0 && to_sq < 64) {
+        //         int prev_piece = pos.get_piece_at(to_sq);
+        //         if (prev_piece >= 1 && prev_piece <= 12) {
+        //             score += continuation_history[prev_piece][to_sq][piece][move.to()];
+        //         }
+        //     }
+        // }
     }
     
     // Center control bonus (improved)
@@ -2118,7 +2157,7 @@ static int quiescence(Position& pos, int alpha, int beta, int ply = 0) {
             }
         }
         
-        scored_moves.emplace_back(move, score_move(pos, move, 0, Move(), ply));
+        scored_moves.emplace_back(move, score_move(pos, move, 0, Move(), ply, Move()));
     }
     
     // Sort captures by score (best first)
@@ -2131,16 +2170,17 @@ static int quiescence(Position& pos, int alpha, int beta, int ply = 0) {
     for (const auto& scored_move : scored_moves) {
         const Move& move = scored_move.first;
         
-        // Make move on copy
-        Position temp = pos;
-        if (!temp.make_move(move)) continue;
+        // Make move on current position
+        if (!pos.make_move(move)) continue;
         
         // Legality check: ensure our king is not in check
-        Bitboard king_bb = temp.pieces[king_piece];
+        Bitboard king_bb = pos.pieces[king_piece];
         if (king_bb == 0) continue; // King captured
         
         int king_sq = lsb(king_bb);
-        if (temp.is_square_attacked(king_sq, 1 - our_color)) {
+        if (pos.is_square_attacked(king_sq, 1 - our_color)) {
+            // Undo the illegal move
+            pos.undo_move(move);
             continue; // Illegal move - king in check
         }
         
@@ -2149,7 +2189,10 @@ static int quiescence(Position& pos, int alpha, int beta, int ply = 0) {
             continue;
         }
         
-        int score_after = -quiescence(temp, -beta, -alpha, ply + 1);
+        int score_after = -quiescence(pos, -beta, -alpha, ply + 1);
+        
+        // Undo move after search
+        pos.undo_move(move);
         
         if (score_after >= beta) return beta;
         if (score_after > alpha) alpha = score_after;
@@ -2281,7 +2324,7 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta, int ply = 0
             continue;  // Skip futile quiet moves
         }
         
-        scored_moves.emplace_back(move, score_move(pos, move, depth, tt_move, ply));
+        scored_moves.emplace_back(move, score_move(pos, move, depth, tt_move, ply, Move()));
     }
     
     std::sort(scored_moves.begin(), scored_moves.end(),
@@ -2301,16 +2344,21 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta, int ply = 0
     for (const auto& scored_move : scored_moves) {
         const Move& move = scored_move.first;
         
-        // Make move on copy
-        Position temp = pos;
-        if (!temp.make_move(move)) continue;
+        // Make move on current position
+        if (!pos.make_move(move)) continue;
         
         // Legality check: ensure our king is not in check
-        Bitboard king_bb = temp.pieces[king_piece];
-        if (king_bb == 0) continue; // King captured
+        Bitboard king_bb = pos.pieces[king_piece];
+        if (king_bb == 0) {
+            // Undo illegal move
+            pos.undo_move(move);
+            continue; // King captured
+        }
         
         int king_sq = lsb(king_bb);
-        if (temp.is_square_attacked(king_sq, 1 - our_color)) {
+        if (pos.is_square_attacked(king_sq, 1 - our_color)) {
+            // Undo illegal move
+            pos.undo_move(move);
             continue; // Illegal move - king in check
         }
         
@@ -2321,7 +2369,7 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta, int ply = 0
         // ===== LATE MOVE REDUCTIONS =====
         if (moves_searched > 3 && depth >= 3 &&
             !move.is_capture() && !move.is_promotion() &&
-            !pos.is_check() && !temp.is_check()) {
+            !pos.is_check() && !pos.is_check()) {
             
             // Calculate reduction
             int reduction = 1;
@@ -2333,23 +2381,32 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta, int ply = 0
             reduction = std::min(reduction, depth - 2);
             
             // Search with reduced depth
-            score_after = -alpha_beta(temp, depth - 1 - reduction, -alpha - 1, -alpha, ply + 1);
+            score_after = -alpha_beta(pos, depth - 1 - reduction, -alpha - 1, -alpha, ply + 1);
             
             // If it fails high, re-search at full depth
             if (score_after > alpha) {
-                score_after = -alpha_beta(temp, depth - 1, -beta, -alpha, ply + 1);
+                score_after = -alpha_beta(pos, depth - 1, -beta, -alpha, ply + 1);
             }
+            
+            // Undo move after search
+            pos.undo_move(move);
         } else if (moves_searched == 1) {
             // Full window search for first move
-            score_after = -alpha_beta(temp, depth - 1, -beta, -alpha, ply + 1);
+            score_after = -alpha_beta(pos, depth - 1, -beta, -alpha, ply + 1);
+            
+            // Undo move after search
+            pos.undo_move(move);
         } else {
             // Null window search (PVS)
-            score_after = -alpha_beta(temp, depth - 1, -alpha - 1, -alpha, ply + 1);
+            score_after = -alpha_beta(pos, depth - 1, -alpha - 1, -alpha, ply + 1);
             
             // Re-search if it beats alpha
             if (score_after > alpha && score_after < beta) {
-                score_after = -alpha_beta(temp, depth - 1, -beta, -alpha, ply + 1);
+                score_after = -alpha_beta(pos, depth - 1, -beta, -alpha, ply + 1);
             }
+            
+            // Undo move after search
+            pos.undo_move(move);
         }
         
         if (score_after > best_score) {
@@ -2922,6 +2979,7 @@ int UCI::hash_size_mb = 16;
 // NNUE evaluation
 int Position::evaluate() const {
     if (NNUE::is_loaded()) {
+        // Direct call to NNUE namespace - NO RECURSION!
         return NNUE::evaluate(*this);
     } else {
         // Fallback to classical evaluation if NNUE not loaded
