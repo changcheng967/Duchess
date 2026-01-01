@@ -1,18 +1,5 @@
-// Duchess Chess Engine - Phase 1: Foundation
-// Single file implementation with bitboard representation and move generation
-//
-// Features implemented:
-// - Bitboard representation for efficient piece storage and operations
-// - Zobrist hashing for position identification and transposition tables
-// - Complete move generation with pseudo-legal and legal move filtering
-// - NNUE neural network evaluation (with fallback to classical evaluation)
-// - Alpha-beta search with iterative deepening
-// - Quiescence search with capture ordering and delta pruning
-// - Move ordering with MVV-LVA, killer moves, and history heuristic
-// - Transposition table with proper memory management
-// - UCI protocol implementation with comprehensive command support
-// - Perft testing for move generation validation
-// - Comprehensive search statistics and debugging output
+// Duchess Chess Engine - Adaptive Hard Limit Chess Engine
+// Bitboard representation, NNUE evaluation, adaptive time management (2s-10s)
 
 #include <iostream>
 #include <vector>
@@ -25,10 +12,6 @@
 #include <sstream>
 #include <iomanip>
 #include <fstream>
-
-// ==================== CONSTANTS AND TYPES ====================
-
-// Board squares
 enum Square {
     A1, B1, C1, D1, E1, F1, G1, H1,
     A2, B2, C2, D2, E2, F2, G2, H2,
@@ -41,35 +24,20 @@ enum Square {
     NO_SQ
 };
 
-// Pieces
 enum Piece {
     EMPTY = 0,
     W_PAWN, W_KNIGHT, W_BISHOP, W_ROOK, W_QUEEN, W_KING,
     B_PAWN, B_KNIGHT, B_BISHOP, B_ROOK, B_QUEEN, B_KING
 };
 
-// Colors
 enum Color {
     WHITE = 0, BLACK = 1
 };
 
-// Castling rights
-const int WHITE_KS = 1;
-const int WHITE_QS = 2;
-const int BLACK_KS = 4;
-const int BLACK_QS = 8;
+const int WHITE_KS = 1, WHITE_QS = 2, BLACK_KS = 4, BLACK_QS = 8;
+const int MOVE_CAPTURE = 1 << 4, MOVE_PROMOTION = 1 << 5;
+const int MOVE_ENPASSANT = 1 << 6, MOVE_CASTLE = 1 << 7;
 
-// Move flags
-const int MOVE_CAPTURE = 1 << 4;
-const int MOVE_PROMOTION = 1 << 5;
-const int MOVE_ENPASSANT = 1 << 6;
-const int MOVE_CASTLE = 1 << 7;
-
-// Move encoding: 16 bits
-// Bits 0-5: from square (0-63)
-// Bits 6-11: to square (0-63)
-// Bits 12-14: promotion piece (0-7)
-// Bit 15: special flags
 struct Move {
     uint16_t data;
     
@@ -81,12 +49,10 @@ struct Move {
     int to() const { return (data >> 6) & 0x3F; }
     int flags() const { return (data >> 12) & 0xF; }
     int promotion() const { return (data >> 12) & 0x7; }
-    
     bool is_capture() const { return (data >> 12) & MOVE_CAPTURE; }
     bool is_promotion() const { return (data >> 12) & MOVE_PROMOTION; }
     bool is_enpassant() const { return (data >> 12) & MOVE_ENPASSANT; }
     bool is_castle() const { return (data >> 12) & MOVE_CASTLE; }
-    
     bool operator==(const Move& other) const { return data == other.data; }
     bool operator!=(const Move& other) const { return data != other.data; }
 };
@@ -95,23 +61,12 @@ struct Move {
 
 using Bitboard = uint64_t;
 
-// Bit manipulation
 constexpr Bitboard SQ(int sq) { return 1ULL << sq; }
-// Windows-compatible bit manipulation functions
 #ifdef _MSC_VER
 #include <intrin.h>
 inline int popcount(Bitboard b) { return __popcnt64(b); }
-inline int lsb(Bitboard b) {
-    if (b == 0) return -1;
-    unsigned long index;
-    if (_BitScanForward64(&index, b)) return static_cast<int>(index);
-    return -1;
-}
-inline int msb(Bitboard b) {
-    unsigned long index;
-    if (_BitScanReverse64(&index, b)) return index;
-    return -1;
-}
+inline int lsb(Bitboard b) { if (b == 0) return -1; unsigned long index; if (_BitScanForward64(&index, b)) return static_cast<int>(index); return -1; }
+inline int msb(Bitboard b) { if (b == 0) return -1; unsigned long index; if (_BitScanReverse64(&index, b)) return static_cast<int>(index); return -1; }
 #else
 inline int popcount(Bitboard b) { return __builtin_popcountll(b); }
 inline int lsb(Bitboard b) { return __builtin_ctzll(b); }
@@ -119,54 +74,31 @@ inline int msb(Bitboard b) { return 63 - __builtin_clzll(b); }
 #endif
 constexpr Bitboard clear_lsb(Bitboard b) { return b & (b - 1ULL); }
 
-// File and rank extraction
 constexpr int file_of(int sq) { return sq & 7; }
 constexpr int rank_of(int sq) { return sq >> 3; }
 constexpr int make_sq(int file, int rank) { return (rank << 3) | file; }
 
-// Direction vectors
 constexpr int NORTH = 8, SOUTH = -8, EAST = 1, WEST = -1;
-constexpr int NORTH_EAST = NORTH + EAST;
-constexpr int NORTH_WEST = NORTH + WEST;
-constexpr int SOUTH_EAST = SOUTH + EAST;
-constexpr int SOUTH_WEST = SOUTH + WEST;
+constexpr int NORTH_EAST = NORTH + EAST, NORTH_WEST = NORTH + WEST;
+constexpr int SOUTH_EAST = SOUTH + EAST, SOUTH_WEST = SOUTH + WEST;
 
 // ==================== ZOBRIST HASHING ====================
 
 class Zobrist {
 private:
-    static constexpr int NUM_PIECES = 13;
-    static constexpr int NUM_SQUARES = 64;
-    static constexpr int NUM_CASTLING = 16;
-    
-    Bitboard piece_keys[NUM_PIECES][NUM_SQUARES];
-    Bitboard side_key;
-    Bitboard castling_keys[NUM_CASTLING];
-    Bitboard enpassant_keys[8];
-    
+    static constexpr int NUM_PIECES = 13, NUM_SQUARES = 64, NUM_CASTLING = 16;
+    Bitboard piece_keys[NUM_PIECES][NUM_SQUARES], side_key;
+    Bitboard castling_keys[NUM_CASTLING], enpassant_keys[8];
     std::mt19937_64 rng;
-    
 public:
     Zobrist() : rng(123456789) {
-        // Initialize random keys
-        for (int p = 1; p <= 12; p++) {
-            for (int s = 0; s < NUM_SQUARES; s++) {
-                piece_keys[p][s] = rng();
-            }
-        }
+        for (int p = 1; p <= 12; p++)
+            for (int s = 0; s < NUM_SQUARES; s++) piece_keys[p][s] = rng();
         side_key = rng();
-        for (int i = 0; i < NUM_CASTLING; i++) {
-            castling_keys[i] = rng();
-        }
-        for (int i = 0; i < 8; i++) {
-            enpassant_keys[i] = rng();
-        }
+        for (int i = 0; i < NUM_CASTLING; i++) castling_keys[i] = rng();
+        for (int i = 0; i < 8; i++) enpassant_keys[i] = rng();
     }
-    
-    Bitboard hash_piece(int piece, int square) const {
-        return piece_keys[piece][square];
-    }
-    
+    Bitboard hash_piece(int piece, int square) const { return piece_keys[piece][square]; }
     Bitboard hash_side() const { return side_key; }
     Bitboard hash_castling(int rights) const { return castling_keys[rights]; }
     Bitboard hash_enpassant(int file) const { return enpassant_keys[file]; }
@@ -179,35 +111,14 @@ static Zobrist zobrist;
 class Attacks {
 private:
     static std::array<std::array<Bitboard, 64>, 2> pawn_attacks_table;
-    static std::array<Bitboard, 64> knight_attacks_table;
-    static std::array<Bitboard, 64> king_attacks_table;
+    static std::array<Bitboard, 64> knight_attacks_table, king_attacks_table;
     static std::array<std::array<Bitboard, 64>, 8> line_attacks_table;
-    
-    static void init_pawn_attacks();
-    static void init_knight_attacks();
-    static void init_king_attacks();
-    static void init_line_attacks();
-    
+    static void init_pawn_attacks(), init_knight_attacks(), init_king_attacks(), init_line_attacks();
 public:
-    static void init() {
-        init_pawn_attacks();
-        init_knight_attacks();
-        init_king_attacks();
-        init_line_attacks();
-    }
-    
-    static Bitboard pawn_attacks(int color, int sq) {
-        return pawn_attacks_table[color][sq];
-    }
-    
-    static Bitboard knight_attacks(int sq) {
-        return knight_attacks_table[sq];
-    }
-    
-    static Bitboard king_attacks(int sq) {
-        return king_attacks_table[sq];
-    }
-    
+    static void init() { init_pawn_attacks(); init_knight_attacks(); init_king_attacks(); init_line_attacks(); }
+    static Bitboard pawn_attacks(int color, int sq) { return pawn_attacks_table[color][sq]; }
+    static Bitboard knight_attacks(int sq) { return knight_attacks_table[sq]; }
+    static Bitboard king_attacks(int sq) { return king_attacks_table[sq]; }
     static Bitboard bishop_attacks(int sq, Bitboard occupied);
     static Bitboard rook_attacks(int sq, Bitboard occupied);
     static Bitboard queen_attacks(int sq, Bitboard occupied);
@@ -217,21 +128,15 @@ std::array<std::array<Bitboard, 64>, 2> Attacks::pawn_attacks_table;
 std::array<Bitboard, 64> Attacks::knight_attacks_table;
 std::array<Bitboard, 64> Attacks::king_attacks_table;
 std::array<std::array<Bitboard, 64>, 8> Attacks::line_attacks_table;
-
 void Attacks::init_pawn_attacks() {
     for (int sq = 0; sq < 64; sq++) {
-        int file = file_of(sq);
-        int rank = rank_of(sq);
-        
-        // White pawn attacks
+        int file = file_of(sq), rank = rank_of(sq);
         Bitboard attacks = 0;
         if (rank < 7) {
             if (file > 0) attacks |= SQ(sq + NORTH_WEST);
             if (file < 7) attacks |= SQ(sq + NORTH_EAST);
         }
         pawn_attacks_table[WHITE][sq] = attacks;
-        
-        // Black pawn attacks
         attacks = 0;
         if (rank > 0) {
             if (file > 0) attacks |= SQ(sq + SOUTH_WEST);
@@ -240,20 +145,14 @@ void Attacks::init_pawn_attacks() {
         pawn_attacks_table[BLACK][sq] = attacks;
     }
 }
-
 void Attacks::init_knight_attacks() {
     const int offsets[] = {-17, -15, -10, -6, 6, 10, 15, 17};
-    
     for (int sq = 0; sq < 64; sq++) {
         Bitboard attacks = 0;
         for (int offset : offsets) {
             int target = sq + offset;
-            if (target >= 0 && target < 64) {
-                int from_file = file_of(sq);
-                int to_file = file_of(target);
-                if (abs(from_file - to_file) <= 2) {
-                    attacks |= SQ(target);
-                }
+            if (target >= 0 && target < 64 && abs(file_of(sq) - file_of(target)) <= 2) {
+                attacks |= SQ(target);
             }
         }
         knight_attacks_table[sq] = attacks;
@@ -262,43 +161,27 @@ void Attacks::init_knight_attacks() {
 
 void Attacks::init_king_attacks() {
     const int offsets[] = {-9, -8, -7, -1, 1, 7, 8, 9};
-    
     for (int sq = 0; sq < 64; sq++) {
         Bitboard attacks = 0;
         for (int offset : offsets) {
             int target = sq + offset;
-            if (target >= 0 && target < 64) {
-                int from_file = file_of(sq);
-                int to_file = file_of(target);
-                if (abs(from_file - to_file) <= 1) {
-                    attacks |= SQ(target);
-                }
+            if (target >= 0 && target < 64 && abs(file_of(sq) - file_of(target)) <= 1) {
+                attacks |= SQ(target);
             }
         }
         king_attacks_table[sq] = attacks;
     }
 }
-
 void Attacks::init_line_attacks() {
-    // Initialize for each direction
-    const int directions[] = {NORTH, SOUTH, EAST, WEST, 
-                             NORTH_EAST, NORTH_WEST, 
-                             SOUTH_EAST, SOUTH_WEST};
-    
+    const int directions[] = {NORTH, SOUTH, EAST, WEST, NORTH_EAST, NORTH_WEST, SOUTH_EAST, SOUTH_WEST};
     for (int dir_idx = 0; dir_idx < 8; dir_idx++) {
         int dir = directions[dir_idx];
         for (int sq = 0; sq < 64; sq++) {
             Bitboard attacks = 0;
             int target = sq + dir;
-            
             while (target >= 0 && target < 64) {
                 attacks |= SQ(target);
-                
-                // Check if we hit edge of board
-                int from_file = file_of(sq);
-                int to_file = file_of(target);
-                if (abs(from_file - to_file) > 1) break;
-                
+                if (abs(file_of(sq) - file_of(target)) > 1) break;
                 target += dir;
             }
             line_attacks_table[dir_idx][sq] = attacks;
@@ -309,7 +192,6 @@ void Attacks::init_line_attacks() {
 // ==================== MAGIC BITBOARDS ====================
 
 namespace MagicBitboards {
-    // Rook magic numbers (pre-computed)
     const Bitboard rook_magics[64] = {
         0x0080001020400080ULL, 0x0040001000200040ULL, 0x0080081000200080ULL, 0x0080040800100080ULL,
         0x0080020400080080ULL, 0x0080010200040080ULL, 0x0080008001000200ULL, 0x0080002040800100ULL,
@@ -329,7 +211,6 @@ namespace MagicBitboards {
         0x0001000204080011ULL, 0x0001000204000801ULL, 0x0001000082000401ULL, 0x0001FFFAABFAD1A2ULL
     };
     
-    // Bishop magic numbers (pre-computed)
     const Bitboard bishop_magics[64] = {
         0x0002020202020200ULL, 0x0002020202020000ULL, 0x0004010202000000ULL, 0x0004040080000000ULL,
         0x0001104000000000ULL, 0x0000821040000000ULL, 0x0000410410400000ULL, 0x0000104104104000ULL,
@@ -349,19 +230,10 @@ namespace MagicBitboards {
         0x0000000010011000ULL, 0x0000000004004000ULL, 0x0000000440440000ULL, 0x0000000022002200ULL
     };
 
-    // Masks for relevant occupancy bits
-    static Bitboard rook_masks[64];
-    static Bitboard bishop_masks[64];
+    static Bitboard rook_masks[64], bishop_masks[64];
+    static int rook_shifts[64], bishop_shifts[64];
+    static Bitboard rook_attacks[64][4096], bishop_attacks[64][512];
     
-    // Shift amounts (64 - number of relevant bits)
-    static int rook_shifts[64];
-    static int bishop_shifts[64];
-    
-    // Attack tables
-    static Bitboard rook_attacks[64][4096];
-    static Bitboard bishop_attacks[64][512];
-    
-    // Generate attacks for a given occupancy
     Bitboard rook_attacks_on_the_fly(int sq, Bitboard occupied) {
         Bitboard result = 0ULL;
         int rank = sq / 8;
@@ -412,7 +284,6 @@ namespace MagicBitboards {
         return result;
     }
     
-    // Initialize magic bitboards
     void init() {
         for (int sq = 0; sq < 64; sq++) {
             int rank = sq / 8;
@@ -499,7 +370,6 @@ namespace MagicBitboards {
         }
     }
     
-    // Fast magic lookup functions
     inline Bitboard get_rook_attacks(int sq, Bitboard occ) {
         occ &= rook_masks[sq];
         occ *= rook_magics[sq];
@@ -515,13 +385,6 @@ namespace MagicBitboards {
     }
 }
 
-// Static member definitions for MagicBitboards
-Bitboard MagicBitboards::rook_masks[64];
-Bitboard MagicBitboards::bishop_masks[64];
-int MagicBitboards::rook_shifts[64];
-int MagicBitboards::bishop_shifts[64];
-Bitboard MagicBitboards::rook_attacks[64][4096];
-Bitboard MagicBitboards::bishop_attacks[64][512];
 
 // Fast magic bitboard bishop attacks
 Bitboard Attacks::bishop_attacks(int sq, Bitboard occupied) {
@@ -538,8 +401,6 @@ Bitboard Attacks::queen_attacks(int sq, Bitboard occupied) {
 }
 
 // ==================== POSITION CLASS ====================
-
-// Undo information for move undo
 struct UndoInfo {
     int captured_piece;
     int castling_rights;
@@ -550,37 +411,18 @@ struct UndoInfo {
 
 class Position {
 public:
-    // Bitboards for each piece type
-    Bitboard pieces[13]; // 0: empty (unused), 1-6: white, 7-12: black
-    Bitboard occupied[2]; // White and black occupancy
-    Bitboard all_occupied;
-    
-    // Game state
-    int side_to_move;
-    int castling_rights;
-    int en_passant_square;
-    int halfmove_clock;
-    int fullmove_number;
-    
-    // Zobrist hash
+    Bitboard pieces[13], occupied[2], all_occupied;
+    int side_to_move, castling_rights, en_passant_square, halfmove_clock, fullmove_number;
     Bitboard hash;
-    
-    // Move history for undo
     std::vector<UndoInfo> history;
-    
-    // NNUE accumulator for incremental evaluation
-    // Note: NNUE namespace is defined later, so we'll use forward declaration
     struct Accumulator {
-        alignas(64) int16_t white[256];
-        alignas(64) int16_t black[256];
+        alignas(64) int16_t white[256], black[256];
         bool computed;
     };
     Accumulator accumulator;
     bool accumulator_valid;
     
 private:
-    
-    // Update hash when piece moves
     void update_hash_remove(int piece, int square) {
         hash ^= zobrist.hash_piece(piece, square);
     }
@@ -619,7 +461,6 @@ private:
     }
     
 public:
-    // Public access for search
     Bitboard get_attacks_to(int square, int attacker_color) const;
     bool is_square_attacked(int square, int attacker_color) const;
     Position();
@@ -634,17 +475,14 @@ public:
     int get_en_passant_square() const { return en_passant_square; }
     Bitboard get_hash() const { return hash; }
     
-    // Move generation
     std::vector<Move> generate_moves() const;
     std::vector<Move> generate_captures() const;
     std::vector<Move> generate_quiet_moves() const;
     std::vector<Move> generate_legal_moves() const;
     
-    // Move execution
     bool make_move(const Move& move);
     void undo_move(const Move& move);
     
-    // Game state
     bool is_check() const;
     bool is_checkmate() const;
     bool is_stalemate() const;
@@ -652,17 +490,13 @@ public:
     bool is_insufficient_material() const;
     bool is_game_over() const;
     
-    // FEN handling
     std::string to_fen() const;
     void from_fen(const std::string& fen);
     
-    // Evaluation
     int evaluate() const;
     
-    // Debug
     void print() const;
     
-    // Helper method for move scoring
     int get_piece_at(int square) const {
         for (int p = 1; p <= 12; p++) {
             if (pieces[p] & SQ(square)) {
@@ -672,7 +506,6 @@ public:
         return EMPTY;
     }
     
-    // NNUE incremental evaluation methods
     void update_nnue_incremental(const Move& move);
     int evaluate_nnue() const;
 };
@@ -682,18 +515,13 @@ public:
 std::vector<Move> Position::generate_moves() const {
     std::vector<Move> moves;
     moves.reserve(128);
-    
-    int friendly = side_to_move;
-    int enemy = 1 - side_to_move;
-    
+    int friendly = side_to_move, enemy = 1 - side_to_move;
     Bitboard pawns = pieces[friendly == WHITE ? W_PAWN : B_PAWN];
     while (pawns) {
         int from = lsb(pawns);
         pawns = clear_lsb(pawns);
-        
         int forward = friendly == WHITE ? NORTH : SOUTH;
-        int rank = rank_of(from);
-        int to = from + forward;
+        int rank = rank_of(from), to = from + forward;
         if (!(all_occupied & SQ(to))) {
             if (rank_of(to) == (friendly == WHITE ? 7 : 0)) {
                 moves.emplace_back(from, to, MOVE_PROMOTION | W_QUEEN);
@@ -704,9 +532,7 @@ std::vector<Move> Position::generate_moves() const {
                 moves.emplace_back(from, to);
                 if ((friendly == WHITE && rank == 1) || (friendly == BLACK && rank == 6)) {
                     to = from + forward + forward;
-                    if (!(all_occupied & SQ(to))) {
-                        moves.emplace_back(from, to);
-                    }
+                    if (!(all_occupied & SQ(to))) moves.emplace_back(from, to);
                 }
             }
         }
@@ -715,7 +541,6 @@ std::vector<Move> Position::generate_moves() const {
         while (targets) {
             int to = lsb(targets);
             targets = clear_lsb(targets);
-            
             if (rank_of(to) == (friendly == WHITE ? 7 : 0)) {
                 moves.emplace_back(from, to, MOVE_CAPTURE | MOVE_PROMOTION | W_QUEEN);
                 moves.emplace_back(from, to, MOVE_CAPTURE | MOVE_PROMOTION | W_ROOK);
@@ -725,17 +550,14 @@ std::vector<Move> Position::generate_moves() const {
                 moves.emplace_back(from, to, MOVE_CAPTURE);
             }
         }
-        if (en_passant_square != NO_SQ) {
-            if (attacks & SQ(en_passant_square)) {
-                moves.emplace_back(from, en_passant_square, MOVE_CAPTURE | MOVE_ENPASSANT);
-            }
+        if (en_passant_square != NO_SQ && (attacks & SQ(en_passant_square))) {
+            moves.emplace_back(from, en_passant_square, MOVE_CAPTURE | MOVE_ENPASSANT);
         }
     }
     Bitboard knights = pieces[friendly == WHITE ? W_KNIGHT : B_KNIGHT];
     while (knights) {
         int from = lsb(knights);
         knights = clear_lsb(knights);
-        
         Bitboard attacks = Attacks::knight_attacks(from) & ~occupied[friendly];
         while (attacks) {
             int to = lsb(attacks);
@@ -747,7 +569,6 @@ std::vector<Move> Position::generate_moves() const {
     while (bishops) {
         int from = lsb(bishops);
         bishops = clear_lsb(bishops);
-        
         Bitboard attacks = Attacks::bishop_attacks(from, all_occupied) & ~occupied[friendly];
         while (attacks) {
             int to = lsb(attacks);
@@ -759,7 +580,6 @@ std::vector<Move> Position::generate_moves() const {
     while (rooks) {
         int from = lsb(rooks);
         rooks = clear_lsb(rooks);
-        
         Bitboard attacks = Attacks::rook_attacks(from, all_occupied) & ~occupied[friendly];
         while (attacks) {
             int to = lsb(attacks);
@@ -771,7 +591,6 @@ std::vector<Move> Position::generate_moves() const {
     while (queens) {
         int from = lsb(queens);
         queens = clear_lsb(queens);
-        
         Bitboard attacks = Attacks::queen_attacks(from, all_occupied) & ~occupied[friendly];
         while (attacks) {
             int to = lsb(attacks);
@@ -779,7 +598,6 @@ std::vector<Move> Position::generate_moves() const {
             moves.emplace_back(from, to, occupied[enemy] & SQ(to) ? MOVE_CAPTURE : 0);
         }
     }
-    
     int king_sq = lsb(pieces[friendly == WHITE ? W_KING : B_KING]);
     Bitboard attacks = Attacks::king_attacks(king_sq) & ~occupied[friendly];
     while (attacks) {
@@ -788,33 +606,16 @@ std::vector<Move> Position::generate_moves() const {
         moves.emplace_back(king_sq, to, occupied[enemy] & SQ(to) ? MOVE_CAPTURE : 0);
     }
     if (friendly == WHITE) {
-        if (castling_rights & WHITE_KS) {
-            if (!(all_occupied & (SQ(F1) | SQ(G1))) &&
-                !is_square_attacked(E1, enemy) && !is_square_attacked(F1, enemy)) {
-                moves.emplace_back(E1, G1, MOVE_CASTLE);
-            }
-        }
-        if (castling_rights & WHITE_QS) {
-            if (!(all_occupied & (SQ(B1) | SQ(C1) | SQ(D1))) &&
-                !is_square_attacked(E1, enemy) && !is_square_attacked(D1, enemy)) {
-                moves.emplace_back(E1, C1, MOVE_CASTLE);
-            }
-        }
+        if (castling_rights & WHITE_KS && !(all_occupied & (SQ(F1) | SQ(G1))) && !is_square_attacked(E1, enemy) && !is_square_attacked(F1, enemy))
+            moves.emplace_back(E1, G1, MOVE_CASTLE);
+        if (castling_rights & WHITE_QS && !(all_occupied & (SQ(B1) | SQ(C1) | SQ(D1))) && !is_square_attacked(E1, enemy) && !is_square_attacked(D1, enemy))
+            moves.emplace_back(E1, C1, MOVE_CASTLE);
     } else {
-        if (castling_rights & BLACK_KS) {
-            if (!(all_occupied & (SQ(F8) | SQ(G8))) &&
-                !is_square_attacked(E8, enemy) && !is_square_attacked(F8, enemy)) {
-                moves.emplace_back(E8, G8, MOVE_CASTLE);
-            }
-        }
-        if (castling_rights & BLACK_QS) {
-            if (!(all_occupied & (SQ(B8) | SQ(C8) | SQ(D8))) &&
-                !is_square_attacked(E8, enemy) && !is_square_attacked(D8, enemy)) {
-                moves.emplace_back(E8, C8, MOVE_CASTLE);
-            }
-        }
+        if (castling_rights & BLACK_KS && !(all_occupied & (SQ(F8) | SQ(G8))) && !is_square_attacked(E8, enemy) && !is_square_attacked(F8, enemy))
+            moves.emplace_back(E8, G8, MOVE_CASTLE);
+        if (castling_rights & BLACK_QS && !(all_occupied & (SQ(B8) | SQ(C8) | SQ(D8))) && !is_square_attacked(E8, enemy) && !is_square_attacked(D8, enemy))
+            moves.emplace_back(E8, C8, MOVE_CASTLE);
     }
-    
     return moves;
 }
 
@@ -2230,18 +2031,49 @@ inline size_t tt_index(Bitboard hash) {
     return hash & (transposition_table.size() - 1);
 }
 
-// Killer moves for move ordering
-static Move killer_moves[2][100];  // 2 killers per depth
-
-// History heuristic for move ordering
+// Legacy static arrays (kept for compatibility)
+static Move killer_moves[2][50];
 static int history_table[13][64][64];
+static Move pv_table[50][50];
+static int pv_length[50];
+static int capture_history[13][64][13];
 
-// Principal Variation table for move ordering
-static Move pv_table[100][100];  // PV at each ply
-static int pv_length[100];       // Length at each ply
+// Stack depth limits to prevent overflow
+constexpr int MAX_SEE_DEPTH = 8;      // Limit SEE recursion depth
+constexpr int MAX_QUIESCENCE_DEPTH = 12;  // Reduced from 16 to 12
+constexpr int MAX_SEARCH_DEPTH = 50;     // Maximum search depth
 
-// Capture history
-static int capture_history[13][64][13];  // [attacker][to][victim]
+// Heap-allocated search context to move large arrays off stack
+class SearchContext {
+public:
+    std::vector<std::vector<Move>> pv_table;
+    std::vector<std::array<Move, 2>> killer_moves;
+    std::vector<std::vector<std::vector<int>>> history_table;
+    
+    SearchContext() {
+        pv_table.resize(100, std::vector<Move>(100, 0));
+        killer_moves.resize(100, {Move(), Move()});
+        history_table.resize(13, std::vector<std::vector<int>>(64, std::vector<int>(64, 0)));
+    }
+};
+
+// Global search context pointer
+SearchContext* search_ctx = nullptr;
+
+// Initialize search context (heap allocation)
+static void init_search() {
+    if (!search_ctx) {
+        search_ctx = new SearchContext();
+    }
+}
+
+// Cleanup search context (free heap memory)
+static void cleanup_search() {
+    if (search_ctx) {
+        delete search_ctx;
+        search_ctx = nullptr;
+    }
+}
 
 // Global node counter
 static uint64_t nodes_searched = 0;
@@ -2323,18 +2155,23 @@ struct ComplexityTracker {
 
 static ComplexityTracker complexity_tracker;
 
-// Static Exchange Evaluation (SEE) with full exchange simulation
-static int see_capture(const Position& pos, const Move& move) {
+// Piece values for SEE
+static const int PIECE_VALUES[] = {0, 100, 320, 330, 500, 900, 20000,  // White
+                                  0, 100, 320, 330, 500, 900, 20000}; // Black
+
+// Static Exchange Evaluation (SEE) with depth limit to prevent stack overflow
+static int see_capture(const Position& pos, const Move& move, int depth = 0) {
     if (!move.is_capture()) return 0;
+    
+    // Prevent stack overflow from deep SEE recursion
+    if (depth >= MAX_SEE_DEPTH) {
+        return 0;
+    }
     
     int from = move.from();
     int to = move.to();
     int attacker = pos.get_piece_at(from);
     int victim = pos.get_piece_at(to);
-    
-    // Piece values
-    const int values[] = {0, 100, 320, 330, 500, 900, 20000,  // White
-                          0, 100, 320, 330, 500, 900, 20000}; // Black
     
     // If no victim, it's not a capture
     if (victim == EMPTY) return 0;
@@ -2344,7 +2181,7 @@ static int see_capture(const Position& pos, const Move& move) {
     int d = 0;
     int last_attacker = attacker;
     
-    gain[d] = values[victim];
+    gain[d] = PIECE_VALUES[victim];
     
     Position temp_pos = pos;
     temp_pos.make_move(move);
@@ -2364,7 +2201,7 @@ static int see_capture(const Position& pos, const Move& move) {
             
             int piece = temp_pos.get_piece_at(m.from());
             if ((piece <= 6 && side == WHITE) || (piece > 6 && side == BLACK)) {
-                int value = values[piece];
+                int value = PIECE_VALUES[piece];
                 if (value < best_value) {
                     best_value = value;
                     best_attacker = piece;
@@ -2375,7 +2212,7 @@ static int see_capture(const Position& pos, const Move& move) {
         
         if (best_attacker == EMPTY) break;
         
-        gain[d] = values[last_attacker] - gain[d - 1];
+        gain[d] = PIECE_VALUES[last_attacker] - gain[d - 1];
         last_attacker = best_attacker;
         
         // Make the capture
@@ -2506,19 +2343,6 @@ static int score_move(const Position& pos, const Move& move, int depth, const Mo
 // Helper function to evaluate position
 static int evaluate_position(const Position& pos) {
     return pos.evaluate();
-}
-
-// Enhanced evaluation combining NNUE with classical bonuses
-static int evaluate_enhanced(const Position& pos) {
-    int score = pos.evaluate();
-    
-    // Add classical evaluation bonuses on top of NNUE
-    score += evaluate_king_safety(pos);
-    score += evaluate_passed_pawns(pos);
-    score += evaluate_mobility(pos);
-    score += evaluate_piece_coordination(pos);
-    
-    return score;
 }
 
 // Evaluate king safety for complexity detection
@@ -2797,8 +2621,8 @@ static int evaluate_piece_coordination(const Position& pos) {
 
 // Quiescence search with improved capture ordering and delta pruning
 static int quiescence(Position& pos, int alpha, int beta, int ply = 0) {
-    // Limit quiescence depth to prevent stack overflow
-    if (ply >= 16) {
+    // Strict depth limit to prevent stack overflow
+    if (ply >= MAX_QUIESCENCE_DEPTH) {
         return evaluate_position(pos);
     }
     
@@ -2809,9 +2633,9 @@ static int quiescence(Position& pos, int alpha, int beta, int ply = 0) {
     if (stand_pat >= beta) return beta;
     if (alpha < stand_pat) alpha = stand_pat;
     
-    // Delta pruning: if even capturing the most valuable piece won't help
-    const int MAX_MATERIAL_GAIN = 1000; // Queen value + margin
-    if (stand_pat + MAX_MATERIAL_GAIN < alpha) {
+    // Delta pruning with safety margin
+    const int DELTA_MARGIN = 900; // Queen value
+    if (stand_pat < alpha - DELTA_MARGIN) {
         return alpha;
     }
     
@@ -2822,27 +2646,12 @@ static int quiescence(Position& pos, int alpha, int beta, int ply = 0) {
     scored_moves.reserve(captures.size());
     
     for (const auto& move : captures) {
-        // Skip bad captures (losing trades)
-        if (move.is_capture()) {
-            int victim = pos.get_piece_at(move.to());
-            int attacker = pos.get_piece_at(move.from());
-            
-            // Simple SEE (Static Exchange Evaluation) approximation
-            int victim_value = (victim == W_PAWN || victim == B_PAWN) ? 100 :
-                              (victim == W_KNIGHT || victim == B_KNIGHT) ? 320 :
-                              (victim == W_BISHOP || victim == B_BISHOP) ? 330 :
-                              (victim == W_ROOK || victim == B_ROOK) ? 500 :
-                              (victim == W_QUEEN || victim == B_QUEEN) ? 900 : 0;
-            int attacker_value = (attacker == W_PAWN || attacker == B_PAWN) ? 100 :
-                                (attacker == W_KNIGHT || attacker == B_KNIGHT) ? 320 :
-                                (attacker == W_BISHOP || attacker == B_BISHOP) ? 330 :
-                                (attacker == W_ROOK || attacker == B_ROOK) ? 500 :
-                                (attacker == W_QUEEN || attacker == B_QUEEN) ? 900 : 0;
-            
-            // Skip obviously losing captures (simplified)
-            if (victim_value < attacker_value && ply > 0) {
-                continue;
-            }
+        // Skip bad captures in quiescence (simplified SEE to avoid deep recursion)
+        int victim = pos.get_piece_at(move.to());
+        int attacker = pos.get_piece_at(move.from());
+        
+        if (PIECE_VALUES[victim % 7] < PIECE_VALUES[attacker % 7] - 100) {
+            continue;  // Skip obviously bad captures
         }
         
         scored_moves.emplace_back(move, score_move(pos, move, 0, Move(), ply, Move()));
@@ -2874,10 +2683,6 @@ static int quiescence(Position& pos, int alpha, int beta, int ply = 0) {
             continue; // Illegal move - king in check
         }
         
-        // Late move pruning in quiescence (skip low-score moves if we already have good result)
-        if (ply >= 4 && scored_move.second < 100000) {
-            continue;
-        }
         
         // Search the copy (no need to undo since we're using a copy)
         int score_after = -quiescence(temp_pos, -beta, -alpha, ply + 1);
@@ -2891,7 +2696,10 @@ static int quiescence(Position& pos, int alpha, int beta, int ply = 0) {
 
 // Alpha-beta search with optimizations
 static int alpha_beta(Position& pos, int depth, int alpha, int beta, int ply = 0) {
-    // GUARD: Prevent stack overflow from negative depth recursion (e.g. from LMR)
+    // Safety check - prevent stack overflow from excessive recursion depth
+    if (ply >= MAX_SEARCH_DEPTH) {
+        return evaluate_position(pos);
+    }
     if (depth <= 0) {
         return quiescence(pos, alpha, beta, ply);
     }
@@ -3129,8 +2937,8 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta, int ply = 0
         int score_after;
         
         // Multi-cut pruning check
-        if (depth >= 6 && moves_searched < 10) {
-            // Try first 10 moves at reduced depth to check for multi-cut
+        if (depth >= 6 && moves_searched < 5) {
+            // Try first 5 moves at reduced depth to check for multi-cut
             int multi_cut_score = -alpha_beta(temp_pos, depth - 4, -beta, -beta + 1, ply + 1);
             if (multi_cut_score >= beta) {
                 // Multi-cut: multiple moves fail high
@@ -3146,8 +2954,11 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta, int ply = 0
             
             // Logarithmic LMR formula
             int reduction = 1 + (int)std::log(moves_searched);
-            if (depth > 6) reduction++;
+            if (depth > 5) reduction++;
             if (!in_pv) reduction++;  // Reduce more in non-PV nodes
+            
+            // Cap reduction at 3 to prevent over-pruning
+            reduction = std::min(reduction, 3);
             
             // Ensure we don't reduce below depth 1
             reduction = std::min(reduction, depth - 2);
@@ -3354,22 +3165,28 @@ public:
     // Initialize search components
     static void init() {
         init_transposition_table(16); // 16MB default
+        init_search(); // Initialize heap-allocated search context
         
         // Clear killer moves and history
-        std::fill_n(killer_moves[0], 100, Move());
-        std::fill_n(killer_moves[1], 100, Move());
+        std::fill_n(killer_moves[0], 50, Move());
+        std::fill_n(killer_moves[1], 50, Move());
         std::fill_n(&history_table[0][0][0], 13 * 64 * 64, 0);
         
-        // ===== FIX: Initialize PV table and lengths =====
-        for (int i = 0; i < 100; i++) {
+        // Initialize PV table and lengths
+        for (int i = 0; i < 50; i++) {
             pv_length[i] = 0;
-            for (int j = 0; j < 100; j++) {
+            for (int j = 0; j < 50; j++) {
                 pv_table[i][j] = Move();
             }
         }
         
-        // ===== FIX: Initialize capture history =====
+        // Initialize capture history
         std::fill_n(&capture_history[0][0][0], 13 * 64 * 13, 0);
+    }
+    
+    // Cleanup search components
+    static void cleanup() {
+        cleanup_search(); // Free heap-allocated search context
     }
     
     static void iterative_deepening(Position& pos, int max_depth, int time_limit_ms) {
@@ -3571,8 +3388,8 @@ private:
             else if (token == "ucinewgame") {
                 current_position.from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
                 std::fill(transposition_table.begin(), transposition_table.end(), TTEntry{});
-                std::fill_n(killer_moves[0], 100, Move());
-                std::fill_n(killer_moves[1], 100, Move());
+                std::fill_n(killer_moves[0], 50, Move());
+                std::fill_n(killer_moves[1], 50, Move());
                 std::fill_n(&history_table[0][0][0], 13 * 64 * 64, 0);
             }
             else if (token == "position") {
@@ -3666,6 +3483,7 @@ private:
                 Search::iterative_deepening(current_position, depth, time);
             }
             else if (token == "quit") {
+                cleanup_search();
                 break;
             }
             else if (token == "stop") {
@@ -3764,7 +3582,7 @@ int main() {
     
     // Initialize all components
     Attacks::init();
-    Search::init(); // Initialize search components
+    Search::init(); // Initialize search components (includes heap allocation)
     NNUE::init();   // Initialize NNUE evaluation
     
     // Test basic functionality
@@ -3773,7 +3591,7 @@ int main() {
     
     // Debug: Print piece bitboards
     for (int p = 1; p <= 12; p++) {
-        std::cout << "Piece " << p << " (" << ".PNBRQKpnbrqk"[p] << "): ";
+        std::cout << "Piece " << p << " (" << ".PNBRQKpnbrQk"[p] << "): ";
         Bitboard b = pos.get_pieces(p);
         for (int sq = 0; sq < 64; sq++) {
             if (b & SQ(sq)) {
@@ -3829,6 +3647,9 @@ int main() {
     // Start UCI loop
     std::cout << "\nStarting UCI protocol...\n";
     UCI::start();
+    
+    // Cleanup before exit
+    cleanup_search();
     
     return 0;
 }
