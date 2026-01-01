@@ -319,6 +319,221 @@ static Magic rook_magics[64];
 static Bitboard bishop_attacks_table[64][512];  // Max 512 entries per square
 static Bitboard rook_attacks_table[64][4096];   // Max 4096 entries per square
 
+// ==================== MAGIC BITBOARDS ====================
+
+namespace MagicBitboards {
+    // Rook magic numbers (pre-computed)
+    const Bitboard rook_magics[64] = {
+        0x0080001020400080ULL, 0x0040001000200040ULL, 0x0080081000200080ULL, 0x0080040800100080ULL,
+        0x0080020400080080ULL, 0x0080010200040080ULL, 0x0080008001000200ULL, 0x0080002040800100ULL,
+        0x0000800020400080ULL, 0x0000400020005000ULL, 0x0000801000200080ULL, 0x0000800800100080ULL,
+        0x0000800400080080ULL, 0x0000800200040080ULL, 0x0000800100020080ULL, 0x0000800040800100ULL,
+        0x0000208000400080ULL, 0x0000404000201000ULL, 0x0000808010002000ULL, 0x0000808008001000ULL,
+        0x0000808004000800ULL, 0x0000808002000400ULL, 0x0000010100020004ULL, 0x0000020000408104ULL,
+        0x0000208080004000ULL, 0x0000200040005000ULL, 0x0000100080200080ULL, 0x0000080080100080ULL,
+        0x0000040080080080ULL, 0x0000020080040080ULL, 0x0000010080800200ULL, 0x0000800080004100ULL,
+        0x0000204000800080ULL, 0x0000200040401000ULL, 0x0000100080802000ULL, 0x0000080080801000ULL,
+        0x0000040080800800ULL, 0x0000020080800400ULL, 0x0000020001010004ULL, 0x0000800040800100ULL,
+        0x0000204000808000ULL, 0x0000200040008080ULL, 0x0000100020008080ULL, 0x0000080010008080ULL,
+        0x0000040008008080ULL, 0x0000020004008080ULL, 0x0000010002008080ULL, 0x0000004081020004ULL,
+        0x0000204000800080ULL, 0x0000200040008080ULL, 0x0000100020008080ULL, 0x0000080010008080ULL,
+        0x0000040008008080ULL, 0x0000020004008080ULL, 0x0000800100020080ULL, 0x0000800041000080ULL,
+        0x00FFFCDDFCED714AULL, 0x007FFCDDFCED714AULL, 0x003FFFCDFFD88096ULL, 0x0000040810002101ULL,
+        0x0001000204080011ULL, 0x0001000204000801ULL, 0x0001000082000401ULL, 0x0001FFFAABFAD1A2ULL
+    };
+
+    // Bishop magic numbers (pre-computed)
+    const Bitboard bishop_magics[64] = {
+        0x0002020202020200ULL, 0x0002020202020000ULL, 0x0004010202000000ULL, 0x0004040080000000ULL,
+        0x0001104000000000ULL, 0x0000821040000000ULL, 0x0000410410400000ULL, 0x0000104104104000ULL,
+        0x0000040404040400ULL, 0x0000020202020200ULL, 0x0000040102020000ULL, 0x0000040400800000ULL,
+        0x0000011040000000ULL, 0x0000008210400000ULL, 0x0000004104104000ULL, 0x0000002082082000ULL,
+        0x0004000808080800ULL, 0x0002000404040400ULL, 0x0001000202020200ULL, 0x0000800802004000ULL,
+        0x0000800400A00000ULL, 0x0000200100884000ULL, 0x0000400082082000ULL, 0x0000200041041000ULL,
+        0x0002080010101000ULL, 0x0001040008080800ULL, 0x0000208004010400ULL, 0x0000404004010200ULL,
+        0x0000840000802000ULL, 0x0000404002011000ULL, 0x0000808001041000ULL, 0x0000404000820800ULL,
+        0x0001041000202000ULL, 0x0000820800101000ULL, 0x0000104400080800ULL, 0x0000020080080080ULL,
+        0x0000404040040100ULL, 0x0000808100020100ULL, 0x0001010100020800ULL, 0x0000808080010400ULL,
+        0x0000820820004000ULL, 0x0000410410002000ULL, 0x0000082088001000ULL, 0x0000002011000800ULL,
+        0x0000080100400400ULL, 0x0001010101000200ULL, 0x0002020202000400ULL, 0x0001010101000200ULL,
+        0x0000410410400000ULL, 0x0000208208200000ULL, 0x0000002084100000ULL, 0x0000000020880000ULL,
+        0x0000001002020000ULL, 0x0000040408020000ULL, 0x0004040404040000ULL, 0x0002020202020000ULL,
+        0x0000104104104000ULL, 0x0000002082082000ULL, 0x0000000020841000ULL, 0x0000000000208800ULL,
+        0x0000000010011000ULL, 0x0000000004004000ULL, 0x0000000440440000ULL, 0x0000000022002200ULL
+    };
+
+    // Masks for relevant occupancy bits
+    Bitboard rook_masks[64];
+    Bitboard bishop_masks[64];
+    
+    // Shift amounts (64 - number of relevant bits)
+    int rook_shifts[64];
+    int bishop_shifts[64];
+    
+    // Attack tables
+    Bitboard rook_attacks[64][4096];
+    Bitboard bishop_attacks[64][512];
+    
+    // Helper: Generate rook mask
+    Bitboard rook_mask(int sq) {
+        Bitboard result = 0ULL;
+        int rank = sq / 8;
+        int file = sq % 8;
+        
+        for (int r = rank + 1; r <= 6; r++) result |= (1ULL << (r * 8 + file));
+        for (int r = rank - 1; r >= 1; r--) result |= (1ULL << (r * 8 + file));
+        for (int f = file + 1; f <= 6; f++) result |= (1ULL << (rank * 8 + f));
+        for (int f = file - 1; f >= 1; f--) result |= (1ULL << (rank * 8 + f));
+        
+        return result;
+    }
+    
+    // Helper: Generate bishop mask
+    Bitboard bishop_mask(int sq) {
+        Bitboard result = 0ULL;
+        int rank = sq / 8;
+        int file = sq % 8;
+        
+        for (int r = rank + 1, f = file + 1; r <= 6 && f <= 6; r++, f++)
+            result |= (1ULL << (r * 8 + f));
+        for (int r = rank - 1, f = file + 1; r >= 1 && f <= 6; r--, f++)
+            result |= (1ULL << (r * 8 + f));
+        for (int r = rank + 1, f = file - 1; r <= 6 && f >= 1; r++, f--)
+            result |= (1ULL << (r * 8 + f));
+        for (int r = rank - 1, f = file - 1; r >= 1 && f >= 1; r--, f--)
+            result |= (1ULL << (r * 8 + f));
+        
+        return result;
+    }
+    
+    // Generate attacks for a given occupancy
+    Bitboard rook_attacks_on_the_fly(int sq, Bitboard occupied) {
+        Bitboard result = 0ULL;
+        int rank = sq / 8;
+        int file = sq % 8;
+        
+        // North
+        for (int r = rank + 1; r <= 7; r++) {
+            result |= (1ULL << (r * 8 + file));
+            if (occupied & (1ULL << (r * 8 + file))) break;
+        }
+        // South
+        for (int r = rank - 1; r >= 0; r--) {
+            result |= (1ULL << (r * 8 + file));
+            if (occupied & (1ULL << (r * 8 + file))) break;
+        }
+        // East
+        for (int f = file + 1; f <= 7; f++) {
+            result |= (1ULL << (rank * 8 + f));
+            if (occupied & (1ULL << (rank * 8 + f))) break;
+        }
+        // West
+        for (int f = file - 1; f >= 0; f--) {
+            result |= (1ULL << (rank * 8 + f));
+            if (occupied & (1ULL << (rank * 8 + f))) break;
+        }
+        
+        return result;
+    }
+    
+    Bitboard bishop_attacks_on_the_fly(int sq, Bitboard occupied) {
+        Bitboard result = 0ULL;
+        int rank = sq / 8;
+        int file = sq % 8;
+        
+        // NE
+        for (int r = rank + 1, f = file + 1; r <= 7 && f <= 7; r++, f++) {
+            result |= (1ULL << (r * 8 + f));
+            if (occupied & (1ULL << (r * 8 + f))) break;
+        }
+        // SE
+        for (int r = rank - 1, f = file + 1; r >= 0 && f <= 7; r--, f++) {
+            result |= (1ULL << (r * 8 + f));
+            if (occupied & (1ULL << (r * 8 + f))) break;
+        }
+        // NW
+        for (int r = rank + 1, f = file - 1; r <= 7 && f >= 0; r++, f--) {
+            result |= (1ULL << (r * 8 + f));
+            if (occupied & (1ULL << (r * 8 + f))) break;
+        }
+        // SW
+        for (int r = rank - 1, f = file - 1; r >= 0 && f >= 0; r--, f--) {
+            result |= (1ULL << (r * 8 + f));
+            if (occupied & (1ULL << (r * 8 + f))) break;
+        }
+        
+        return result;
+    }
+    
+    // Initialize magic bitboards
+    void init() {
+        // Initialize rook tables
+        for (int sq = 0; sq < 64; sq++) {
+            rook_masks[sq] = rook_mask(sq);
+            rook_shifts[sq] = 64 - popcount(rook_masks[sq]);
+            
+            Bitboard mask = rook_masks[sq];
+            int n = popcount(mask);
+            
+            for (int i = 0; i < (1 << n); i++) {
+                Bitboard occupied = 0ULL;
+                Bitboard temp_mask = mask;
+                
+                for (int bit = 0; bit < n; bit++) {
+                    int sq_bit = lsb(temp_mask);
+                    temp_mask = clear_lsb(temp_mask);
+                    if (i & (1 << bit)) {
+                        occupied |= (1ULL << sq_bit);
+                    }
+                }
+                
+                int index = (int)((occupied * rook_magics[sq]) >> rook_shifts[sq]);
+                rook_attacks[sq][index] = rook_attacks_on_the_fly(sq, occupied);
+            }
+        }
+        
+        // Initialize bishop tables
+        for (int sq = 0; sq < 64; sq++) {
+            bishop_masks[sq] = bishop_mask(sq);
+            bishop_shifts[sq] = 64 - popcount(bishop_masks[sq]);
+            
+            Bitboard mask = bishop_masks[sq];
+            int n = popcount(mask);
+            
+            for (int i = 0; i < (1 << n); i++) {
+                Bitboard occupied = 0ULL;
+                Bitboard temp_mask = mask;
+                
+                for (int bit = 0; bit < n; bit++) {
+                    int sq_bit = lsb(temp_mask);
+                    temp_mask = clear_lsb(temp_mask);
+                    if (i & (1 << bit)) {
+                        occupied |= (1ULL << sq_bit);
+                    }
+                }
+                
+                int index = (int)((occupied * bishop_magics[sq]) >> bishop_shifts[sq]);
+                bishop_attacks[sq][index] = bishop_attacks_on_the_fly(sq, occupied);
+            }
+        }
+    }
+    
+    // Fast magic lookup functions
+    inline Bitboard get_rook_attacks(int sq, Bitboard occ) {
+        occ &= rook_masks[sq];
+        occ *= rook_magics[sq];
+        occ >>= rook_shifts[sq];
+        return rook_attacks[sq][occ];
+    }
+    
+    inline Bitboard get_bishop_attacks(int sq, Bitboard occ) {
+        occ &= bishop_masks[sq];
+        occ *= bishop_magics[sq];
+        occ >>= bishop_shifts[sq];
+        return bishop_attacks[sq][occ];
+    }
+}
+
 // Helper function to get bishop blocker mask
 Bitboard get_bishop_blockers(int sq) {
     Bitboard blockers = 0;
@@ -1045,6 +1260,114 @@ void Position::print() const {
     std::cout << "Castling: " << castling_rights << "\n";
     std::cout << "En passant: " << (en_passant_square == NO_SQ ? "-" : std::to_string(en_passant_square)) << "\n";
     std::cout << "Hash: 0x" << std::hex << hash << std::dec << "\n";
+}
+
+// ==================== PIECE-SQUARE TABLES ====================
+
+namespace PST {
+    // Pawn piece-square table
+    const int pawn_table[64] = {
+          0,   0,   0,   0,   0,   0,   0,   0,
+         50,  50,  50,  50,  50,  50,  50,  50,
+         10,  10,  20,  30,  30,  20,  10,  10,
+          5,   5,  10,  25,  25,  10,   5,   5,
+          0,   0,   0,  20,  20,   0,   0,   0,
+          5,  -5, -10,   0,   0, -10,  -5,   5,
+          5,  10,  10, -20, -20,  10,  10,   5,
+          0,   0,   0,   0,   0,   0,   0,   0
+    };
+    
+    // Knight piece-square table
+    const int knight_table[64] = {
+        -50, -40, -30, -30, -30, -30, -40, -50,
+        -40, -20,   0,   0,   0,   0, -20, -40,
+        -30,   0,  10,  15,  15,  10,   0, -30,
+        -30,   5,  15,  20,  20,  15,   5, -30,
+        -30,   0,  15,  10,  10,  15,   0, -30,
+        -30,   5,  10,  15,  15,  10,   5, -30,
+        -40, -20,   0,   5,   5,   0, -20, -40,
+        -50, -40, -30, -30, -30, -30, -40, -50
+    };
+    
+    // Bishop piece-square table
+    const int bishop_table[64] = {
+        -20, -10, -10, -10, -10, -10, -10, -20,
+        -10,   0,   0,   0,   0,   0,   0, -10,
+        -10,   0,  10,  10,  10,  10,   0, -10,
+        -10,   5,   5,  10,  10,   5,   5, -10,
+        -10,   0,  10,  10,  10,  10,   0, -10,
+        -10,  10,  10,  10,  10,  10,  10, -10,
+        -10,   5,   0,   0,   0,   0,   5, -10,
+        -20, -10, -10, -10, -10, -10, -10, -20
+    };
+    
+    // Rook piece-square table
+    const int rook_table[64] = {
+          0,   0,   0,   0,   0,   0,   0,   0,
+          5,  10,  10,  10,  10,  10,  10,  10,
+         -5,   0,   0,   0,   0,   0,   0,  -5,
+         -5,   0,   0,   0,   0,   0,   0,  -5,
+         -5,   0,   0,   0,   0,   0,   0,  -5,
+         -5,   0,   0,   0,   0,   0,   0,  -5,
+         -5,   0,   0,   0,   0,   0,   0,  -5,
+          0,   0,   0,   5,   5,   0,   0,   0
+    };
+    
+    // Queen piece-square table
+    const int queen_table[64] = {
+        -20, -10, -10,  -5,  -5, -10, -10, -20,
+        -10,   0,   0,   0,   0,   0,   0, -10,
+        -10,   0,   5,   5,   5,   5,   0, -10,
+         -5,   0,   5,   5,   5,   5,   0,  -5,
+          0,   0,   5,   5,   5,   5,   0,  -5,
+        -10,   5,   5,   5,   5,   5,   0, -10,
+        -10,   0,   5,   0,   0,   0,   0, -10,
+        -20, -10, -10,  -5,  -5, -10, -10, -20
+    };
+    
+    // King midgame piece-square table
+    const int king_mg_table[64] = {
+        -30, -40, -40, -50, -50, -40, -40, -30,
+        -30, -40, -40, -50, -50, -40, -40, -30,
+        -30, -40, -40, -50, -50, -40, -40, -30,
+        -30, -40, -40, -50, -50, -40, -40, -30,
+        -20, -30, -30, -40, -40, -30, -30, -20,
+        -10, -20, -20, -20, -20, -20, -20, -10,
+         20,  20,   0,   0,   0,   0,  20,  20,
+         20,  30,  10,   0,   0,  10,  30,  20
+    };
+    
+    // King endgame piece-square table
+    const int king_eg_table[64] = {
+        -50, -40, -30, -20, -20, -30, -40, -50,
+        -30, -20, -10,   0,   0,  -10, -20, -30,
+        -30, -20, -10,   0,   0,  -10, -20, -30,
+        -30, -20, -10,   0,   0,  -10, -20, -30,
+        -30, -20, -10,   0,   0,  -10, -20, -30,
+        -30, -20, -10,   0,   0,  -10, -20, -30,
+        -30, -20, -10,   0,   0,  -10, -20, -30,
+        -50, -30, -30, -30, -30, -30, -30, -50
+    };
+    
+    // Get PST value for a piece on a square
+    inline int get_value(int piece, int sq, bool endgame) {
+        // Flip square for black pieces (black pieces use mirrored tables)
+        int table_sq = sq;
+        if (piece >= B_PAWN) {
+            table_sq = sq ^ 56; // Flip rank
+        }
+        
+        switch (piece) {
+            case W_PAWN: case B_PAWN: return pawn_table[table_sq];
+            case W_KNIGHT: case B_KNIGHT: return knight_table[table_sq];
+            case W_BISHOP: case B_BISHOP: return bishop_table[table_sq];
+            case W_ROOK: case B_ROOK: return rook_table[table_sq];
+            case W_QUEEN: case B_QUEEN: return queen_table[table_sq];
+            case W_KING: case B_KING:
+                return endgame ? king_eg_table[table_sq] : king_mg_table[table_sq];
+            default: return 0;
+        }
+    }
 }
 
 // ==================== NNUE EVALUATION ====================
@@ -2572,8 +2895,8 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta, int ply = 0
             int multi_cut_score = -alpha_beta(temp_pos, depth - 4, -beta, -beta + 1, ply + 1);
             if (multi_cut_score >= beta) {
                 // Multi-cut: multiple moves fail high
-                score_after = beta;
-                break; // Skip full search
+                // Don't break - continue searching remaining moves
+                continue;
             }
         }
         
