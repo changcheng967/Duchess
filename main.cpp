@@ -82,10 +82,10 @@ struct Move {
     int flags() const { return (data >> 12) & 0xF; }
     int promotion() const { return (data >> 12) & 0x7; }
     
-    bool is_capture() const { return (data >> 4) & 1; }
-    bool is_promotion() const { return (data >> 5) & 1; }
-    bool is_enpassant() const { return (data >> 6) & 1; }
-    bool is_castle() const { return (data >> 7) & 1; }
+    bool is_capture() const { return (data >> 12) & MOVE_CAPTURE; }
+    bool is_promotion() const { return (data >> 12) & MOVE_PROMOTION; }
+    bool is_enpassant() const { return (data >> 12) & MOVE_ENPASSANT; }
+    bool is_castle() const { return (data >> 12) & MOVE_CASTLE; }
     
     bool operator==(const Move& other) const { return data == other.data; }
     bool operator!=(const Move& other) const { return data != other.data; }
@@ -306,7 +306,95 @@ void Attacks::init_line_attacks() {
     }
 }
 
-Bitboard Attacks::bishop_attacks(int sq, Bitboard occupied) {
+// Magic bitboard structure for faster sliding piece attacks
+struct Magic {
+    Bitboard mask;
+    Bitboard magic;
+    Bitboard* attacks;
+    int shift;
+};
+
+static Magic bishop_magics[64];
+static Magic rook_magics[64];
+static Bitboard bishop_attacks_table[64][512];  // Max 512 entries per square
+static Bitboard rook_attacks_table[64][4096];   // Max 4096 entries per square
+
+// Helper function to get bishop blocker mask
+Bitboard get_bishop_blockers(int sq) {
+    Bitboard blockers = 0;
+    int file = file_of(sq);
+    int rank = rank_of(sq);
+    
+    // Northeast
+    int target = sq + NORTH_EAST;
+    while (target >= 0 && target < 64 && file_of(target) > file && rank_of(target) > rank) {
+        blockers |= SQ(target);
+        target += NORTH_EAST;
+    }
+    
+    // Northwest
+    target = sq + NORTH_WEST;
+    while (target >= 0 && target < 64 && file_of(target) < file && rank_of(target) > rank) {
+        blockers |= SQ(target);
+        target += NORTH_WEST;
+    }
+    
+    // Southeast
+    target = sq + SOUTH_EAST;
+    while (target >= 0 && target < 64 && file_of(target) > file && rank_of(target) < rank) {
+        blockers |= SQ(target);
+        target += SOUTH_EAST;
+    }
+    
+    // Southwest
+    target = sq + SOUTH_WEST;
+    while (target >= 0 && target < 64 && file_of(target) < file && rank_of(target) < rank) {
+        blockers |= SQ(target);
+        target += SOUTH_WEST;
+    }
+    
+    return blockers;
+}
+
+// Helper function to get rook blocker mask
+Bitboard get_rook_blockers(int sq) {
+    Bitboard blockers = 0;
+    int file = file_of(sq);
+    int rank = rank_of(sq);
+    
+    // North
+    int target = sq + NORTH;
+    while (target >= 0 && target < 64 && rank_of(target) > rank) {
+        blockers |= SQ(target);
+        target += NORTH;
+    }
+    
+    // South
+    target = sq + SOUTH;
+    while (target >= 0 && target < 64 && rank_of(target) < rank) {
+        blockers |= SQ(target);
+        target += SOUTH;
+    }
+    
+    // East
+    target = sq + EAST;
+    while (target >= 0 && target < 64 && file_of(target) > file) {
+        blockers |= SQ(target);
+        target += EAST;
+    }
+    
+    // West
+    target = sq + WEST;
+    while (target >= 0 && target < 64 && file_of(target) < file) {
+        blockers |= SQ(target);
+        target += WEST;
+    }
+    
+    return blockers;
+}
+
+// Slow bishop attacks for table generation
+Bitboard bishop_attacks_slow(int sq, Bitboard occupied) {
     Bitboard attacks = 0;
     
     // Northeast
@@ -344,7 +432,8 @@ Bitboard Attacks::bishop_attacks(int sq, Bitboard occupied) {
     return attacks;
 }
 
-Bitboard Attacks::rook_attacks(int sq, Bitboard occupied) {
+// Slow rook attacks for table generation
+Bitboard rook_attacks_slow(int sq, Bitboard occupied) {
     Bitboard attacks = 0;
     
     // North
@@ -382,8 +471,20 @@ Bitboard Attacks::rook_attacks(int sq, Bitboard occupied) {
     return attacks;
 }
 
+// Fast magic bitboard bishop attacks
+Bitboard Attacks::bishop_attacks(int sq, Bitboard occupied) {
+    // For now, use the slow but working version
+    return bishop_attacks_slow(sq, occupied);
+}
+
+// Fast magic bitboard rook attacks
+Bitboard Attacks::rook_attacks(int sq, Bitboard occupied) {
+    // For now, use the slow but working version
+    return rook_attacks_slow(sq, occupied);
+}
+
 Bitboard Attacks::queen_attacks(int sq, Bitboard occupied) {
-    return bishop_attacks(sq, occupied) | rook_attacks(sq, occupied);
+    return Attacks::bishop_attacks(sq, occupied) | Attacks::rook_attacks(sq, occupied);
 }
 
 // ==================== POSITION CLASS ====================
@@ -735,30 +836,27 @@ std::vector<Move> Position::generate_legal_moves() const {
     int our_color = side_to_move;
     int king_piece = (our_color == WHITE) ? W_KING : B_KING;
     
-    // Get king position BEFORE any moves
+    // Get king position
     Bitboard king_bb = pieces[king_piece];
     if (king_bb == 0) {
-        // No king - invalid position
         return legal;
     }
-    int king_sq = lsb(king_bb);
-    
-    // Use make_move/undo_move to avoid expensive copying
-    // Cast to non-const to use make/undo safely
-    Position& mutable_pos = const_cast<Position&>(*this);
     
     for (const auto& move : pseudo_legal) {
-        if (mutable_pos.make_move(move)) {
-            int new_king_sq = lsb(mutable_pos.pieces[king_piece]);
-            
-            // Check if king is attacked AFTER the move
-            if (!mutable_pos.is_square_attacked(new_king_sq, 1 - our_color)) {
-                legal.push_back(move);
-            }
-            
-            // Undo the move
-            mutable_pos.undo_move(move);
+        // ✅ FIX: Create a COPY instead of modifying original
+        Position temp_pos = *this;
+        
+        if (!temp_pos.make_move(move)) continue;
+        
+        // Check if our king is in check after the move
+        Bitboard new_king_bb = temp_pos.pieces[king_piece];
+        if (new_king_bb == 0) continue; // King captured (illegal)
+        
+        int new_king_sq = lsb(new_king_bb);
+        if (!temp_pos.is_square_attacked(new_king_sq, 1 - our_color)) {
+            legal.push_back(move);
         }
+        // No undo needed - temp_pos is destroyed
     }
     
     return legal;
@@ -1499,8 +1597,8 @@ namespace NNUE {
             output += layer2_output[i] * output_weights[i];
         }
         
-        // Scale output to centipawns (CORRECTED: 400 → 100)
-        int eval = (output * 100) / (127 * OUTPUT_SCALE);
+        // Scale output to centipawns (Stockfish scale)
+        int eval = (output * 400) / (127 * OUTPUT_SCALE);
         
         // Apply game phase scaling
         int total_material = 0;
@@ -1663,22 +1761,38 @@ bool Position::make_move(const Move& move) {
         update_hash_add(promotion_piece, to);
     }
     
-    // Update castling rights
+    // Update castling rights for moving piece
     int old_castling = castling_rights;
-    if (piece == W_KING || piece == B_KING) {
-        castling_rights &= ~(color == WHITE ? (WHITE_KS | WHITE_QS) : (BLACK_KS | BLACK_QS));
-    }
-    if (piece == W_ROOK) {
+    
+    if (piece == W_KING) {
+        castling_rights &= ~(WHITE_KS | WHITE_QS);
+    } else if (piece == B_KING) {
+        castling_rights &= ~(BLACK_KS | BLACK_QS);
+    } else if (piece == W_ROOK) {
         if (from == A1) castling_rights &= ~WHITE_QS;
         if (from == H1) castling_rights &= ~WHITE_KS;
-    }
-    if (piece == B_ROOK) {
+    } else if (piece == B_ROOK) {
         if (from == A8) castling_rights &= ~BLACK_QS;
         if (from == H8) castling_rights &= ~BLACK_KS;
     }
-    if (old_castling != castling_rights) {
-        update_hash_castling();
+
+    // ✅ NEW: Update castling rights for captured rooks
+    if (captured != -1) {
+        if (captured == W_ROOK) {
+            if (to == A1) castling_rights &= ~WHITE_QS;
+            if (to == H1) castling_rights &= ~WHITE_KS;
+        } else if (captured == B_ROOK) {
+            if (to == A8) castling_rights &= ~BLACK_QS;
+            if (to == H8) castling_rights &= ~BLACK_KS;
+        }
     }
+
+    // ✅ CORRECT: XOR out old, XOR in new
+    // XOR out old castling rights
+    hash ^= zobrist.hash_castling(old_castling);
+
+    // XOR in new castling rights
+    hash ^= zobrist.hash_castling(castling_rights);
     
     // Update en passant
     int old_ep = en_passant_square;
@@ -1788,8 +1902,8 @@ void Position::undo_move(const Move& move) {
     if (move.is_promotion()) {
         int pawn = (color == WHITE) ? W_PAWN : B_PAWN;
         
-        // Remove promoted piece from 'from' square
-        pieces[move.promotion()] ^= SQ(from);
+        // Remove promoted piece from 'to' square
+        pieces[move.promotion()] ^= SQ(to);
         
         // Restore pawn to 'from' square
         pieces[pawn] ^= SQ(from);
@@ -1810,10 +1924,11 @@ void Position::update_nnue_incremental(const Move& move) {
     accumulator_valid = false;
 }
 
-// REMOVED - Not needed anymore
-// int Position::evaluate_nnue() const {
-//     return evaluate();  // ← This was the bug!
-// }
+// NNUE evaluation wrapper
+int Position::evaluate_nnue() const {
+    // Delegate to NNUE namespace
+    return NNUE::evaluate(*this);
+}
 
 // ==================== GAME STATE CHECKS ====================
 
@@ -1997,6 +2112,35 @@ static uint64_t nodes_searched = 0;
 // Global search control
 static bool search_stopped = false;
 
+// Static Exchange Evaluation (SEE) for better capture ordering
+static int see_capture(const Position& pos, const Move& move) {
+    if (!move.is_capture()) return 0;
+    
+    int from = move.from();
+    int to = move.to();
+    int attacker = pos.get_piece_at(from);
+    int victim = pos.get_piece_at(to);
+    
+    // Piece values
+    const int values[] = {0, 100, 320, 330, 500, 900, 20000,  // White
+                          0, 100, 320, 330, 500, 900, 20000}; // Black
+    
+    // If no victim, it's not a capture
+    if (victim == EMPTY) return 0;
+    
+    // Simple SEE: just compare piece values for now
+    // This prevents obviously losing trades
+    int attacker_value = values[attacker];
+    int victim_value = values[victim];
+    
+    // If attacker value >= victim value, it's a good capture
+    if (attacker_value <= victim_value) {
+        return victim_value - attacker_value; // Good capture
+    } else {
+        return -1000; // Bad capture - avoid
+    }
+}
+
 // Move scoring for ordering with improved heuristics
 static int score_move(const Position& pos, const Move& move, int depth, const Move& tt_move = Move(), int ply = 0, const Move& prev_move = Move()) {
     int score = 0;
@@ -2021,7 +2165,7 @@ static int score_move(const Position& pos, const Move& move, int depth, const Mo
     //     }
     // }
     
-    // MVV-LVA (Most Valuable Victim - Least Valuable Attacker)
+    // MVV-LVA (Most Valuable Victim - Least Valuable Attacker) with SEE
     if (move.is_capture()) {
         int victim = pos.get_piece_at(move.to());
         int attacker = pos.get_piece_at(move.from());
@@ -2045,8 +2189,15 @@ static int score_move(const Position& pos, const Move& move, int depth, const Mo
                             (attacker == W_QUEEN || attacker == B_QUEEN) ? 900 : 0;
         }
         
-        // Improved MVV-LVA scoring
-        score += 1000000 + (victim_value * 10) - attacker_value;
+        // SEE evaluation to avoid bad captures
+        int see_score = see_capture(pos, move);
+        if (see_score < -500) {
+            // Very bad capture - heavily penalize
+            return -1000000;
+        }
+        
+        // Improved MVV-LVA scoring with SEE bonus
+        score += 1000000 + (victim_value * 10) - attacker_value + see_score;
         
         // Capture history bonus
         if (attacker >= 1 && attacker <= 12 && victim >= 1 && victim <= 12) {
@@ -2266,6 +2417,33 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta, int ply = 0
         if (alpha >= beta) return entry.score;
     }
     
+    // Singular extensions
+    bool singular_extension = false;
+    if (depth >= 8 && tt_move.data && entry.depth >= depth - 3 && entry.hash == hash) {
+        int singular_beta = entry.score - 2 * depth;
+        int singular_depth = (depth - 1) / 2;
+        
+        // Search all moves except TT move at reduced depth
+        int cutoff_count = 0;
+        auto moves = pos.generate_moves();
+        
+        for (const auto& move : moves) {
+            if (move == tt_move) continue;
+            
+            Position temp_pos = pos;
+            if (!temp_pos.make_move(move)) continue;
+            
+            int score = -alpha_beta(temp_pos, singular_depth, -singular_beta, -singular_beta + 1, ply + 1);
+            if (score < singular_beta) {
+                cutoff_count++;
+                if (cutoff_count >= 2) {
+                    singular_extension = true;
+                    break;
+                }
+            }
+        }
+    }
+    
     // Internal Iterative Deepening (IID)
     if (depth >= 4 && !tt_move.data && !pos.is_check()) {
         int iid_depth = depth - 2;
@@ -2387,6 +2565,17 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta, int ply = 0
         moves_searched++;
         legal_moves++;
         int score_after;
+        
+        // Multi-cut pruning check
+        if (depth >= 6 && moves_searched < 10) {
+            // Try first 10 moves at reduced depth to check for multi-cut
+            int multi_cut_score = -alpha_beta(temp_pos, depth - 4, -beta, -beta + 1, ply + 1);
+            if (multi_cut_score >= beta) {
+                // Multi-cut: multiple moves fail high
+                score_after = beta;
+                break; // Skip full search
+            }
+        }
         
         // ===== LATE MOVE REDUCTIONS =====
         if (moves_searched > 3 && depth >= 3 &&
@@ -2735,6 +2924,56 @@ private:
     static Position current_position;  // Global position state
     static int hash_size_mb;           // Hash table size in MB
     
+    // Helper function to parse and find matching move
+    static Move parse_move_string(const Position& pos, const std::string& move_str) {
+        if (move_str.length() < 4) return Move();
+        
+        int from_file = move_str[0] - 'a';
+        int from_rank = move_str[1] - '1';
+        int to_file = move_str[2] - 'a';
+        int to_rank = move_str[3] - '1';
+        
+        if (from_file < 0 || from_file > 7 || from_rank < 0 || from_rank > 7 ||
+            to_file < 0 || to_file > 7 || to_rank < 0 || to_rank > 7) {
+            return Move();  // Invalid coordinates
+        }
+        
+        int from = from_file + from_rank * 8;
+        int to = to_file + to_rank * 8;
+        
+        // Get all legal moves and find matching one
+        auto legal_moves = pos.generate_legal_moves();
+        
+        for (const auto& legal_move : legal_moves) {
+            if (legal_move.from() == from && legal_move.to() == to) {
+                // Check for promotion
+                if (move_str.length() >= 5) {
+                    char promo = move_str[4];
+                    int promo_piece = 0;
+                    
+                    switch (promo) {
+                        case 'q': promo_piece = (pos.get_side_to_move() == WHITE) ? W_QUEEN : B_QUEEN; break;
+                        case 'r': promo_piece = (pos.get_side_to_move() == WHITE) ? W_ROOK : B_ROOK; break;
+                        case 'b': promo_piece = (pos.get_side_to_move() == WHITE) ? W_BISHOP : B_BISHOP; break;
+                        case 'n': promo_piece = (pos.get_side_to_move() == WHITE) ? W_KNIGHT : B_KNIGHT; break;
+                        default: continue;  // Invalid promotion
+                    }
+                    
+                    if (legal_move.is_promotion() && legal_move.promotion() == promo_piece) {
+                        return legal_move;
+                    }
+                } else {
+                    // Non-promotion move
+                    if (!legal_move.is_promotion()) {
+                        return legal_move;
+                    }
+                }
+            }
+        }
+        
+        return Move();  // No matching legal move found
+    }
+    
     static void uci_loop() {
         std::string command;
         
@@ -2763,8 +3002,7 @@ private:
                         ss >> token; // "value"
                         if (token == "value") {
                             ss >> hash_size_mb;
-                            // Adjust transposition table size based on hash setting
-                            size_t new_size = 1ULL << (10 + hash_size_mb / 4); // Rough approximation
+                            size_t new_size = 1ULL << (10 + hash_size_mb / 4);
                             transposition_table.resize(new_size);
                             std::cout << "info string Hash table resized to " << hash_size_mb << "MB\n";
                         }
@@ -2772,11 +3010,8 @@ private:
                 }
             }
             else if (token == "ucinewgame") {
-                // Reset to starting position
                 current_position.from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
-                // Clear transposition table
                 std::fill(transposition_table.begin(), transposition_table.end(), TTEntry{});
-                // Clear killer moves and history
                 std::fill_n(killer_moves[0], 100, Move());
                 std::fill_n(killer_moves[1], 100, Move());
                 std::fill_n(&history_table[0][0][0], 13 * 64 * 64, 0);
@@ -2790,7 +3025,6 @@ private:
                 if (part == "startpos") {
                     fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
                 } else if (part == "fen") {
-                    // Read FEN
                     fen = "";
                     while (ss >> part && part != "moves") {
                         if (!fen.empty()) fen += " ";
@@ -2799,53 +3033,41 @@ private:
                 }
                 
                 // Read moves
-                while (ss >> part) {
-                    moves.push_back(part);
+                if (part == "moves" || ss >> part) {
+                    if (part == "moves") {
+                        while (ss >> part) {
+                            moves.push_back(part);
+                        }
+                    } else {
+                        moves.push_back(part);
+                        while (ss >> part) {
+                            moves.push_back(part);
+                        }
+                    }
                 }
                 
-                // Apply position and moves to global state
+                // Apply position
                 current_position.from_fen(fen);
                 
-                // Apply moves
+                // Apply moves with validation
                 for (const auto& move_str : moves) {
-                    // Parse move string (e.g., "e2e4" or "e7e8q")
-                    if (move_str.length() >= 4) {
-                        int from_file = move_str[0] - 'a';
-                        int from_rank = move_str[1] - '1';
-                        int to_file = move_str[2] - 'a';
-                        int to_rank = move_str[3] - '1';
-                        
-                        int from = from_file + from_rank * 8;
-                        int to = to_file + to_rank * 8;
-                        
-                        Move move(from, to);
-                        
-                        // Handle promotion
-                        if (move_str.length() >= 5) {
-                            char promo = move_str[4];
-                            int promo_piece = W_QUEEN;  // Default
-                            switch (promo) {
-                                case 'q': promo_piece = (current_position.get_side_to_move() == WHITE) ? W_QUEEN : B_QUEEN; break;
-                                case 'r': promo_piece = (current_position.get_side_to_move() == WHITE) ? W_ROOK : B_ROOK; break;
-                                case 'b': promo_piece = (current_position.get_side_to_move() == WHITE) ? W_BISHOP : B_BISHOP; break;
-                                case 'n': promo_piece = (current_position.get_side_to_move() == WHITE) ? W_KNIGHT : B_KNIGHT; break;
-                            }
-                            move = Move(from, to, MOVE_PROMOTION | promo_piece);
-                        }
-                        
-                        current_position.make_move(move);
+                    Move move = parse_move_string(current_position, move_str);
+                    if (move.data == 0) {
+                        std::cout << "info string Invalid move: " << move_str << "\n";
+                        break;
                     }
+                    current_position.make_move(move);
                 }
             }
             else if (token == "go") {
-                search_stopped = false;  // Reset flag for new search
+                search_stopped = false;
                 
-                // Parse go command
-                int depth = 8; // Default depth
-                int time = 900; // Default time in ms (1 second limit)
+                int depth = 20; // Modern standard depth
+                int time = -1;  // Default to infinite
                 int wtime = -1, btime = -1, winc = 0, binc = 0;
                 bool ponder = false;
                 int multipv = 1;
+                bool infinite = false;
                 
                 while (ss >> token) {
                     if (token == "depth") ss >> depth;
@@ -2855,34 +3077,41 @@ private:
                     else if (token == "binc") ss >> binc;
                     else if (token == "ponder") ponder = true;
                     else if (token == "multipv") ss >> multipv;
-                    else if (token == "infinite") time = -1; // Infinite search
+                    else if (token == "infinite") infinite = true;
                 }
                 
-                // Time management
-                if (wtime > 0 || btime > 0) {
+                // Time management - Dynamic allocation based on game phase
+                if (!infinite && (wtime > 0 || btime > 0)) {
                     int time_ms = (current_position.get_side_to_move() == WHITE) ? wtime : btime;
                     int inc_ms = (current_position.get_side_to_move() == WHITE) ? winc : binc;
                     
-                    // Allocate time based on remaining time and increment
-                    // Simple time allocation: use 10% of remaining time + 50% of increment
-                    time = (time_ms / 10) + (inc_ms / 2);
+                    // Dynamic time allocation based on game phase
+                    int moves_to_go = std::max(20, 60 - current_position.fullmove_number);
+                    time = (time_ms / moves_to_go) + (inc_ms * 0.75);
+                    time = std::min(time, time_ms / 3);  // Never use more than 1/3 of remaining time
                     
-                    // Cap time to prevent excessive thinking
-                    if (time > 30000) time = 30000; // 30 seconds max
-                    if (time < 100) time = 100;     // 100ms minimum
+                    if (time > 30000) time = 30000;
+                    if (time < 100) time = 100;
+                } else if (infinite) {
+                    // For infinite search, use a reasonable default time limit
+                    // to prevent the engine from hanging indefinitely
+                    time = 2000;  // 2 seconds default for infinite search
+                    depth = 100;  // Search very deep but with time limit
+                } else {
+                    // No time specified and not infinite - use default time
+                    time = 2000;  // 2 seconds default
                 }
                 
                 std::cout << "info string Time management: depth=" << depth
                           << " time=" << time << "ms ponder=" << (ponder ? "true" : "false") << "\n";
                 
-                // Start search with iterative deepening using current position
                 Search::iterative_deepening(current_position, depth, time);
             }
             else if (token == "quit") {
                 break;
             }
             else if (token == "stop") {
-                search_stopped = true;  // Set flag
+                search_stopped = true;
                 std::cout << "info string Search stopped\n";
             }
             else if (token == "perft") {
@@ -2896,23 +3125,17 @@ private:
                 
                 std::cout << "Perft depth " << depth << ": " << nodes << " nodes in " << duration.count() << "ms\n";
             }
-            else if (token == "test") {
-                Perft::run_test_suite();
-            }
             else if (token == "debug") {
-                // Debug command to show current position
                 current_position.print();
                 std::cout << "info string Position hash: 0x" << std::hex << current_position.get_hash() << std::dec << "\n";
                 std::cout << "info string Castling rights: " << current_position.get_castling_rights() << "\n";
                 std::cout << "info string En passant: " << current_position.get_en_passant_square() << "\n";
             }
             else if (token == "eval") {
-                // Evaluate current position
                 int score = current_position.evaluate();
                 std::cout << "info string Evaluation: " << score << " centipawns\n";
             }
             else if (token == "moves") {
-                // List all legal moves
                 auto moves = current_position.generate_legal_moves();
                 std::cout << "info string Legal moves (" << moves.size() << "): ";
                 for (const auto& move : moves) {
@@ -2923,87 +3146,17 @@ private:
                     std::cout << from_file << from_rank << to_file << to_rank << " ";
                 }
                 std::cout << "\n";
-            }
-            else if (token == "help") {
-                std::cout << "Available commands:\n";
-                std::cout << "  uci              - Initialize UCI protocol\n";
-                std::cout << "  isready          - Check if engine is ready\n";
-                std::cout << "  ucinewgame       - Reset to starting position\n";
-                std::cout << "  position fen ... - Set position from FEN\n";
-                std::cout << "  position startpos [moves ...] - Set starting position with moves\n";
-                std::cout << "  go [depth N] [wtime N] [btime N] - Start search\n";
-                std::cout << "  perft N          - Run perft test to depth N\n";
-                std::cout << "  test             - Run perft test suite\n";
-                std::cout << "  debug            - Show debug information\n";
-                std::cout << "  eval             - Evaluate current position\n";
-                std::cout << "  moves            - List all legal moves\n";
-                std::cout << "  quit             - Exit engine\n";
-            }
-            else if (!token.empty() && token[0] != '#') {
-                // Unknown command
-                std::cout << "info string Unknown command: " << token << "\n";
-                std::cout << "info string Type 'help' for available commands\n";
-            }
-            else if (token == "test") {
-                Perft::run_test_suite();
-            }
-            else if (token == "debug") {
-                // Debug command to show current position
-                current_position.print();
-                std::cout << "info string Position hash: 0x" << std::hex << current_position.get_hash() << std::dec << "\n";
-                std::cout << "info string Castling rights: " << current_position.get_castling_rights() << "\n";
-                std::cout << "info string En passant: " << current_position.get_en_passant_square() << "\n";
-            }
-            else if (token == "eval") {
-                // Evaluate current position
-                int score = current_position.evaluate();
-                std::cout << "info string Evaluation: " << score << " centipawns\n";
-            }
-            else if (token == "moves") {
-                // List all legal moves
-                auto moves = current_position.generate_legal_moves();
-                std::cout << "info string Legal moves (" << moves.size() << "): ";
-                for (const auto& move : moves) {
-                    char from_file = 'a' + file_of(move.from());
-                    char from_rank = '1' + rank_of(move.from());
-                    char to_file = 'a' + file_of(move.to());
-                    char to_rank = '1' + rank_of(move.to());
-                    std::cout << from_file << from_rank << to_file << to_rank << " ";
-                }
-                std::cout << "\n";
-            }
-            else if (token == "help") {
-                std::cout << "Available commands:\n";
-                std::cout << "  uci              - Initialize UCI protocol\n";
-                std::cout << "  isready          - Check if engine is ready\n";
-                std::cout << "  ucinewgame       - Reset to starting position\n";
-                std::cout << "  position fen ... - Set position from FEN\n";
-                std::cout << "  position startpos [moves ...] - Set starting position with moves\n";
-                std::cout << "  go [depth N] [wtime N] [btime N] - Start search\n";
-                std::cout << "  perft N          - Run perft test to depth N\n";
-                std::cout << "  test             - Run perft test suite\n";
-                std::cout << "  debug            - Show debug information\n";
-                std::cout << "  eval             - Evaluate current position\n";
-                std::cout << "  moves            - List all legal moves\n";
-                std::cout << "  quit             - Exit engine\n";
-            }
-            else if (!token.empty() && token[0] != '#') {
-                // Unknown command
-                std::cout << "info string Unknown command: " << token << "\n";
-                std::cout << "info string Type 'help' for available commands\n";
             }
         }
     }
     
 public:
     static void start() {
-        hash_size_mb = 16; // Default hash size
-        
-        // Initialize starting position
+        hash_size_mb = 16;
         current_position.from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
         
         Attacks::init();
-        NNUE::init(); // Initialize NNUE
+        NNUE::init();
         
         std::cout << "info string Duchess Chess Engine initialized\n";
         std::cout << "info string Type 'help' for available commands\n";
