@@ -367,22 +367,18 @@ namespace MagicBitboards {
         int rank = sq / 8;
         int file = sq % 8;
         
-        // North
         for (int r = rank + 1; r <= 7; r++) {
             result |= (1ULL << (r * 8 + file));
             if (occupied & (1ULL << (r * 8 + file))) break;
         }
-        // South
         for (int r = rank - 1; r >= 0; r--) {
             result |= (1ULL << (r * 8 + file));
             if (occupied & (1ULL << (r * 8 + file))) break;
         }
-        // East
         for (int f = file + 1; f <= 7; f++) {
             result |= (1ULL << (rank * 8 + f));
             if (occupied & (1ULL << (rank * 8 + f))) break;
         }
-        // West
         for (int f = file - 1; f >= 0; f--) {
             result |= (1ULL << (rank * 8 + f));
             if (occupied & (1ULL << (rank * 8 + f))) break;
@@ -396,22 +392,18 @@ namespace MagicBitboards {
         int rank = sq / 8;
         int file = sq % 8;
         
-        // NE
         for (int r = rank + 1, f = file + 1; r <= 7 && f <= 7; r++, f++) {
             result |= (1ULL << (r * 8 + f));
             if (occupied & (1ULL << (r * 8 + f))) break;
         }
-        // SE
         for (int r = rank - 1, f = file + 1; r >= 0 && f <= 7; r--, f++) {
             result |= (1ULL << (r * 8 + f));
             if (occupied & (1ULL << (r * 8 + f))) break;
         }
-        // NW
         for (int r = rank + 1, f = file - 1; r <= 7 && f >= 0; r++, f--) {
             result |= (1ULL << (r * 8 + f));
             if (occupied & (1ULL << (r * 8 + f))) break;
         }
-        // SW
         for (int r = rank - 1, f = file - 1; r >= 0 && f >= 0; r--, f--) {
             result |= (1ULL << (r * 8 + f));
             if (occupied & (1ULL << (r * 8 + f))) break;
@@ -422,26 +414,20 @@ namespace MagicBitboards {
     
     // Initialize magic bitboards
     void init() {
-        // Initialize rook tables
         for (int sq = 0; sq < 64; sq++) {
-            // Generate rook mask inline
             int rank = sq / 8;
             int file = sq % 8;
             Bitboard mask = 0;
             
-            // North (excluding edge)
             for (int r = rank + 1; r <= 6; r++) {
                 mask |= (1ULL << (r * 8 + file));
             }
-            // South (excluding edge)
             for (int r = rank - 1; r >= 1; r--) {
                 mask |= (1ULL << (r * 8 + file));
             }
-            // East (excluding edge)
             for (int f = file + 1; f <= 6; f++) {
                 mask |= (1ULL << (rank * 8 + f));
             }
-            // West (excluding edge)
             for (int f = file - 1; f >= 1; f--) {
                 mask |= (1ULL << (rank * 8 + f));
             }
@@ -470,26 +456,20 @@ namespace MagicBitboards {
             }
         }
         
-        // Initialize bishop tables
         for (int sq = 0; sq < 64; sq++) {
-            // Generate bishop mask inline
             int rank = sq / 8;
             int file = sq % 8;
             Bitboard mask = 0;
             
-            // NE (excluding edge)
             for (int r = rank + 1, f = file + 1; r <= 6 && f <= 6; r++, f++) {
                 mask |= (1ULL << (r * 8 + f));
             }
-            // SE (excluding edge)
             for (int r = rank - 1, f = file + 1; r >= 1 && f <= 6; r--, f++) {
                 mask |= (1ULL << (r * 8 + f));
             }
-            // NW (excluding edge)
             for (int r = rank + 1, f = file - 1; r <= 6 && f >= 1; r++, f--) {
                 mask |= (1ULL << (r * 8 + f));
             }
-            // SW (excluding edge)
             for (int r = rank - 1, f = file - 1; r >= 1 && f >= 1; r--, f--) {
                 mask |= (1ULL << (r * 8 + f));
             }
@@ -623,8 +603,6 @@ private:
         hash ^= zobrist.hash_side();
     }
     
-    // Helper functions
-    Bitboard get_attacks_to(int square, int attacker_color) const;
     void update_occupancy() {
         occupied[WHITE] = 0;
         occupied[BLACK] = 0;
@@ -642,6 +620,7 @@ private:
     
 public:
     // Public access for search
+    Bitboard get_attacks_to(int square, int attacker_color) const;
     bool is_square_attacked(int square, int attacker_color) const;
     Position();
     Position(const std::string& fen);
@@ -702,36 +681,27 @@ public:
 
 std::vector<Move> Position::generate_moves() const {
     std::vector<Move> moves;
-    
-    // Generate all pseudo-legal moves
-    moves.reserve(128); // Reserve space for efficiency
+    moves.reserve(128);
     
     int friendly = side_to_move;
     int enemy = 1 - side_to_move;
     
-    // Pawns
     Bitboard pawns = pieces[friendly == WHITE ? W_PAWN : B_PAWN];
     while (pawns) {
         int from = lsb(pawns);
         pawns = clear_lsb(pawns);
         
-        // Pawn moves
         int forward = friendly == WHITE ? NORTH : SOUTH;
         int rank = rank_of(from);
-        
-        // Single push
         int to = from + forward;
         if (!(all_occupied & SQ(to))) {
             if (rank_of(to) == (friendly == WHITE ? 7 : 0)) {
-                // Promotion
                 moves.emplace_back(from, to, MOVE_PROMOTION | W_QUEEN);
                 moves.emplace_back(from, to, MOVE_PROMOTION | W_ROOK);
                 moves.emplace_back(from, to, MOVE_PROMOTION | W_BISHOP);
                 moves.emplace_back(from, to, MOVE_PROMOTION | W_KNIGHT);
             } else {
                 moves.emplace_back(from, to);
-                
-                // Double push
                 if ((friendly == WHITE && rank == 1) || (friendly == BLACK && rank == 6)) {
                     to = from + forward + forward;
                     if (!(all_occupied & SQ(to))) {
@@ -740,8 +710,6 @@ std::vector<Move> Position::generate_moves() const {
                 }
             }
         }
-        
-        // Captures
         Bitboard attacks = Attacks::pawn_attacks(friendly, from);
         Bitboard targets = attacks & occupied[enemy];
         while (targets) {
@@ -749,7 +717,6 @@ std::vector<Move> Position::generate_moves() const {
             targets = clear_lsb(targets);
             
             if (rank_of(to) == (friendly == WHITE ? 7 : 0)) {
-                // Promotion capture
                 moves.emplace_back(from, to, MOVE_CAPTURE | MOVE_PROMOTION | W_QUEEN);
                 moves.emplace_back(from, to, MOVE_CAPTURE | MOVE_PROMOTION | W_ROOK);
                 moves.emplace_back(from, to, MOVE_CAPTURE | MOVE_PROMOTION | W_BISHOP);
@@ -758,16 +725,12 @@ std::vector<Move> Position::generate_moves() const {
                 moves.emplace_back(from, to, MOVE_CAPTURE);
             }
         }
-        
-        // En passant
         if (en_passant_square != NO_SQ) {
             if (attacks & SQ(en_passant_square)) {
                 moves.emplace_back(from, en_passant_square, MOVE_CAPTURE | MOVE_ENPASSANT);
             }
         }
     }
-    
-    // Knights
     Bitboard knights = pieces[friendly == WHITE ? W_KNIGHT : B_KNIGHT];
     while (knights) {
         int from = lsb(knights);
@@ -780,8 +743,6 @@ std::vector<Move> Position::generate_moves() const {
             moves.emplace_back(from, to, occupied[enemy] & SQ(to) ? MOVE_CAPTURE : 0);
         }
     }
-    
-    // Bishops
     Bitboard bishops = pieces[friendly == WHITE ? W_BISHOP : B_BISHOP];
     while (bishops) {
         int from = lsb(bishops);
@@ -794,8 +755,6 @@ std::vector<Move> Position::generate_moves() const {
             moves.emplace_back(from, to, occupied[enemy] & SQ(to) ? MOVE_CAPTURE : 0);
         }
     }
-    
-    // Rooks
     Bitboard rooks = pieces[friendly == WHITE ? W_ROOK : B_ROOK];
     while (rooks) {
         int from = lsb(rooks);
@@ -808,8 +767,6 @@ std::vector<Move> Position::generate_moves() const {
             moves.emplace_back(from, to, occupied[enemy] & SQ(to) ? MOVE_CAPTURE : 0);
         }
     }
-    
-    // Queens
     Bitboard queens = pieces[friendly == WHITE ? W_QUEEN : B_QUEEN];
     while (queens) {
         int from = lsb(queens);
@@ -823,18 +780,13 @@ std::vector<Move> Position::generate_moves() const {
         }
     }
     
-    // King
     int king_sq = lsb(pieces[friendly == WHITE ? W_KING : B_KING]);
-    
-    // King moves
     Bitboard attacks = Attacks::king_attacks(king_sq) & ~occupied[friendly];
     while (attacks) {
         int to = lsb(attacks);
         attacks = clear_lsb(attacks);
         moves.emplace_back(king_sq, to, occupied[enemy] & SQ(to) ? MOVE_CAPTURE : 0);
     }
-    
-    // Castling
     if (friendly == WHITE) {
         if (castling_rights & WHITE_KS) {
             if (!(all_occupied & (SQ(F1) | SQ(G1))) &&
@@ -910,20 +862,17 @@ std::vector<Move> Position::generate_legal_moves() const {
     }
     
     for (const auto& move : pseudo_legal) {
-        // ✅ FIX: Create a COPY instead of modifying original
         Position temp_pos = *this;
         
         if (!temp_pos.make_move(move)) continue;
         
-        // Check if our king is in check after the move
         Bitboard new_king_bb = temp_pos.pieces[king_piece];
-        if (new_king_bb == 0) continue; // King captured (illegal)
+        if (new_king_bb == 0) continue;
         
         int new_king_sq = lsb(new_king_bb);
         if (!temp_pos.is_square_attacked(new_king_sq, 1 - our_color)) {
             legal.push_back(move);
         }
-        // No undo needed - temp_pos is destroyed
     }
     
     return legal;
@@ -1222,12 +1171,6 @@ namespace PST {
 }
 
 // ==================== NNUE EVALUATION ====================
-
-// ==================== COMPLETE FIXED NNUE EVALUATION ====================
-// Replace the entire NNUE namespace in your code with this implementation
-
-// ==================== COMPLETE FIXED NNUE EVALUATION ====================
-// Replace the entire NNUE namespace in your code with this implementation
 
 namespace NNUE {
     // Stockfish NNUE architecture: HalfKAv2_hm (768->256x2->32->32->1)
@@ -1799,8 +1742,6 @@ namespace NNUE {
     }
 }
 
-// ==================== MOVE EXECUTION ====================
-
 bool Position::make_move(const Move& move) {
     int from = move.from();
     int to = move.to();
@@ -2092,15 +2033,10 @@ void Position::undo_move(const Move& move) {
 
 // Incremental NNUE accumulator update
 void Position::update_nnue_incremental(const Move& move) {
-    // For now, just mark accumulator as invalid to use classical evaluation
-    // This is a simplified implementation - full incremental NNUE would require
-    // the complete NNUE namespace to be available
     accumulator_valid = false;
 }
 
-// NNUE evaluation wrapper
 int Position::evaluate_nnue() const {
-    // Delegate to NNUE namespace
     return NNUE::evaluate(*this);
 }
 
@@ -2153,18 +2089,15 @@ bool Position::is_checkmate() const {
         Position temp_pos = *this;
         if (!temp_pos.make_move(move)) continue;
         
-        // Check if our king is still in check after the move
         Bitboard new_king_bb = temp_pos.pieces[king_piece];
-        if (new_king_bb == 0) continue; // King captured (illegal)
+        if (new_king_bb == 0) continue;
         
         int new_king_sq = lsb(new_king_bb);
         if (!temp_pos.is_square_attacked(new_king_sq, 1 - our_color)) {
-            // Found a legal move that gets out of check
             return false;
         }
     }
     
-    // No legal moves found and we're in check - it's checkmate
     return true;
 }
 
@@ -2177,22 +2110,18 @@ bool Position::is_stalemate() const {
     int king_piece = (our_color == WHITE) ? W_KING : B_KING;
     
     for (const auto& move : moves) {
-        // Try move on a copy of position
         Position temp_pos = *this;
         if (!temp_pos.make_move(move)) continue;
         
-        // Check if our king is still in check after the move
         Bitboard new_king_bb = temp_pos.pieces[king_piece];
-        if (new_king_bb == 0) continue; // King captured (illegal)
+        if (new_king_bb == 0) continue;
         
         int new_king_sq = lsb(new_king_bb);
         if (!temp_pos.is_square_attacked(new_king_sq, 1 - our_color)) {
-            // Found a legal move - not stalemate
             return false;
         }
     }
     
-    // No legal moves found and not in check - it's stalemate
     return true;
 }
 
@@ -2320,7 +2249,81 @@ static uint64_t nodes_searched = 0;
 // Global search control
 static bool search_stopped = false;
 
-// Static Exchange Evaluation (SEE) for better capture ordering
+// Position complexity tracking for adaptive time limits
+struct ComplexityTracker {
+    int eval_history[10];
+    int eval_history_count;
+    Move best_move_history[10];
+    int best_move_change_count;
+    int tactical_moves_count;
+    int king_safety_score;
+    bool is_critical;
+    
+    ComplexityTracker() {
+        for (int i = 0; i < 10; i++) {
+            eval_history[i] = 0;
+            best_move_history[i] = Move();
+        }
+        eval_history_count = 0;
+        best_move_change_count = 0;
+        tactical_moves_count = 0;
+        king_safety_score = 0;
+        is_critical = false;
+    }
+    
+    void add_eval_score(int score) {
+        eval_history[eval_history_count % 10] = score;
+        eval_history_count++;
+    }
+    
+    void add_best_move(const Move& move) {
+        if (eval_history_count > 0 && best_move_history[(eval_history_count - 1) % 10] != move) {
+            best_move_change_count++;
+        }
+        best_move_history[eval_history_count % 10] = move;
+    }
+    
+    int get_eval_variance() const {
+        if (eval_history_count < 2) return 0;
+        int count = std::min(eval_history_count, 5);
+        int min_val = eval_history[0];
+        int max_val = eval_history[0];
+        for (int i = 1; i < count; i++) {
+            min_val = std::min(min_val, eval_history[i]);
+            max_val = std::max(max_val, eval_history[i]);
+        }
+        return max_val - min_val;
+    }
+    
+    bool is_stable() const {
+        return get_eval_variance() < 30 && best_move_change_count <= 1;
+    }
+    
+    bool is_complex() const {
+        int variance = get_eval_variance();
+        return (variance >= 100 && variance < 200) ||
+               (best_move_change_count >= 2) ||
+               (tactical_moves_count >= 3);
+    }
+    
+    bool is_critical_position() const {
+        return get_eval_variance() >= 200 ||
+               best_move_change_count >= 3 ||
+               king_safety_score < -100 ||
+               is_critical;
+    }
+    
+    int get_time_allocation() const {
+        if (is_critical_position()) return 10000;
+        if (is_complex()) return 6000;
+        if (is_stable()) return 2000;
+        return 4000;
+    }
+};
+
+static ComplexityTracker complexity_tracker;
+
+// Static Exchange Evaluation (SEE) with full exchange simulation
 static int see_capture(const Position& pos, const Move& move) {
     if (!move.is_capture()) return 0;
     
@@ -2336,17 +2339,60 @@ static int see_capture(const Position& pos, const Move& move) {
     // If no victim, it's not a capture
     if (victim == EMPTY) return 0;
     
-    // Simple SEE: just compare piece values for now
-    // This prevents obviously losing trades
-    int attacker_value = values[attacker];
-    int victim_value = values[victim];
+    // Full SEE with exchange simulation
+    int gain[32] = {0};
+    int d = 0;
+    int last_attacker = attacker;
     
-    // If attacker value >= victim value, it's a good capture
-    if (attacker_value <= victim_value) {
-        return victim_value - attacker_value; // Good capture
-    } else {
-        return -1000; // Bad capture - avoid
+    gain[d] = values[victim];
+    
+    Position temp_pos = pos;
+    temp_pos.make_move(move);
+    
+    int side = 1 - (attacker <= 6 ? WHITE : BLACK);
+    
+    while (true) {
+        d++;
+        
+        // Find the least valuable attacker
+        int best_attacker = EMPTY;
+        int best_value = 30000;
+        
+        auto moves = temp_pos.generate_captures();
+        for (const auto& m : moves) {
+            if (m.to() != to) continue;
+            
+            int piece = temp_pos.get_piece_at(m.from());
+            if ((piece <= 6 && side == WHITE) || (piece > 6 && side == BLACK)) {
+                int value = values[piece];
+                if (value < best_value) {
+                    best_value = value;
+                    best_attacker = piece;
+                    from = m.from();
+                }
+            }
+        }
+        
+        if (best_attacker == EMPTY) break;
+        
+        gain[d] = values[last_attacker] - gain[d - 1];
+        last_attacker = best_attacker;
+        
+        // Make the capture
+        temp_pos.make_move(Move(from, to, MOVE_CAPTURE));
+        
+        // Check if we should stop (X-ray attacks)
+        side = 1 - side;
+        
+        if (d >= 31) break;
     }
+    
+    // Minimax evaluation
+    while (--d > 0) {
+        gain[d - 1] = -std::max(-gain[d - 1], gain[d]);
+    }
+    
+    return gain[0];
 }
 
 // Move scoring for ordering with improved heuristics
@@ -2462,10 +2508,297 @@ static int evaluate_position(const Position& pos) {
     return pos.evaluate();
 }
 
+// Enhanced evaluation combining NNUE with classical bonuses
+static int evaluate_enhanced(const Position& pos) {
+    int score = pos.evaluate();
+    
+    // Add classical evaluation bonuses on top of NNUE
+    score += evaluate_king_safety(pos);
+    score += evaluate_passed_pawns(pos);
+    score += evaluate_mobility(pos);
+    score += evaluate_piece_coordination(pos);
+    
+    return score;
+}
+
+// Evaluate king safety for complexity detection
+static int evaluate_king_safety(const Position& pos) {
+    int score = 0;
+    int side = pos.get_side_to_move();
+    int king_piece = (side == WHITE) ? W_KING : B_KING;
+    int enemy_king = (side == WHITE) ? B_KING : W_KING;
+    
+    Bitboard king_bb = pos.get_pieces(king_piece);
+    if (king_bb == 0) return 0;
+    
+    int king_sq = lsb(king_bb);
+    int king_file = file_of(king_sq);
+    int king_rank = rank_of(king_sq);
+    
+    // Check if king is in center (safer)
+    if (king_file >= 3 && king_file <= 4 && king_rank >= 3 && king_rank <= 4) {
+        score += 50;
+    }
+    
+    // Check if king is on back rank (safer in middlegame)
+    if (side == WHITE && king_rank <= 1) score += 30;
+    if (side == BLACK && king_rank >= 6) score += 30;
+    
+    // Pawn shield evaluation
+    Bitboard pawns = pos.get_pieces(side == WHITE ? W_PAWN : B_PAWN);
+    Bitboard king_pawns = 0;
+    
+    if (side == WHITE) {
+        if (king_sq >= 0 && king_sq < 56) {
+            if (king_sq + 8 < 64) king_pawns |= SQ(king_sq + 8);
+            if (king_file > 0 && king_sq + 7 < 64) king_pawns |= SQ(king_sq + 7);
+            if (king_file < 7 && king_sq + 9 < 64) king_pawns |= SQ(king_sq + 9);
+        }
+    } else {
+        if (king_sq >= 8 && king_sq < 64) {
+            if (king_sq - 8 >= 0) king_pawns |= SQ(king_sq - 8);
+            if (king_file > 0 && king_sq - 9 >= 0) king_pawns |= SQ(king_sq - 9);
+            if (king_file < 7 && king_sq - 7 >= 0) king_pawns |= SQ(king_sq - 7);
+        }
+    }
+    
+    int pawn_shield = popcount(pawns & king_pawns);
+    score += pawn_shield * 20;
+    
+    // Open file danger
+    Bitboard king_file_bb = 0;
+    for (int r = 0; r < 8; r++) {
+        king_file_bb |= SQ(make_sq(king_file, r));
+    }
+    Bitboard enemy_rooks_queens = pos.get_pieces(side == WHITE ? B_ROOK : W_ROOK) |
+                                 pos.get_pieces(side == WHITE ? B_QUEEN : W_QUEEN);
+    if ((enemy_rooks_queens & king_file_bb) && !(pawns & king_file_bb)) {
+        score -= 50;  // Open file danger
+    }
+    
+    // Attack weight (exponential)
+    Bitboard king_surroundings = 0;
+    for (int i = -1; i <= 1; i++) {
+        for (int j = -1; j <= 1; j++) {
+            int f = king_file + i;
+            int r = king_rank + j;
+            if (f >= 0 && f < 8 && r >= 0 && r < 8) {
+                king_surroundings |= SQ(make_sq(f, r));
+            }
+        }
+    }
+    
+    Bitboard enemy_attacks = pos.get_attacks_to(king_sq, 1 - side);
+    int attack_count = popcount(enemy_attacks & king_surroundings);
+    score -= (attack_count * attack_count) * 15;  // Exponential penalty
+    
+    // King tropism (distance to enemy king)
+    Bitboard enemy_king_bb = pos.get_pieces(enemy_king);
+    if (enemy_king_bb != 0) {
+        int enemy_king_sq = lsb(enemy_king_bb);
+        int file_dist = abs(file_of(king_sq) - file_of(enemy_king_sq));
+        int rank_dist = abs(rank_of(king_sq) - rank_of(enemy_king_sq));
+        int dist = file_dist + rank_dist;
+        score -= (14 - dist) * 5;  // Closer to enemy king = more danger
+    }
+    
+    return score;
+}
+
+// Evaluate passed pawns
+static int evaluate_passed_pawns(const Position& pos) {
+    int score = 0;
+    
+    for (int color = 0; color < 2; color++) {
+        int pawn = (color == WHITE) ? W_PAWN : B_PAWN;
+        Bitboard pawns = pos.get_pieces(pawn);
+        Bitboard enemy_pawns = pos.get_pieces(color == WHITE ? B_PAWN : W_PAWN);
+        
+        while (pawns) {
+            int sq = lsb(pawns);
+            pawns = clear_lsb(pawns);
+            
+            int rank = rank_of(sq);
+            int file = file_of(sq);
+            
+            // Check if pawn is passed (no enemy pawns ahead)
+            Bitboard front_span = 0;
+            if (color == WHITE) {
+                for (int r = rank + 1; r <= 7; r++) {
+                    front_span |= SQ(make_sq(file, r));
+                    if (file > 0) front_span |= SQ(make_sq(file - 1, r));
+                    if (file < 7) front_span |= SQ(make_sq(file + 1, r));
+                }
+            } else {
+                for (int r = rank - 1; r >= 0; r--) {
+                    front_span |= SQ(make_sq(file, r));
+                    if (file > 0) front_span |= SQ(make_sq(file - 1, r));
+                    if (file < 7) front_span |= SQ(make_sq(file + 1, r));
+                }
+            }
+            
+            if (!(enemy_pawns & front_span)) {
+                // Passed pawn found
+                int advancement = (color == WHITE) ? rank : (7 - rank);
+                int bonus = advancement * advancement * 10;  // Exponential scoring
+                score += (color == WHITE) ? bonus : -bonus;
+                
+                // Bonus for protected passed pawn
+                Bitboard attackers = Attacks::pawn_attacks(1 - color, sq);
+                Bitboard friendly_pawns = pos.get_pieces(pawn);
+                if (friendly_pawns & attackers) {
+                    score += (color == WHITE) ? 30 : -30;
+                }
+            }
+        }
+    }
+    
+    return score;
+}
+
+// Evaluate mobility
+static int evaluate_mobility(const Position& pos) {
+    int score = 0;
+    
+    for (int color = 0; color < 2; color++) {
+        int our_color = color;
+        Bitboard occupied = pos.get_all_occupied();
+        
+        // Knights
+        Bitboard knights = pos.get_pieces(our_color == WHITE ? W_KNIGHT : B_KNIGHT);
+        int knight_mobility = 0;
+        while (knights) {
+            int sq = lsb(knights);
+            knights = clear_lsb(knights);
+            Bitboard attacks = Attacks::knight_attacks(sq) & ~occupied;
+            knight_mobility += popcount(attacks);
+        }
+        score += (our_color == WHITE) ? knight_mobility * 4 : -knight_mobility * 4;
+        
+        // Bishops
+        Bitboard bishops = pos.get_pieces(our_color == WHITE ? W_BISHOP : B_BISHOP);
+        int bishop_mobility = 0;
+        while (bishops) {
+            int sq = lsb(bishops);
+            bishops = clear_lsb(bishops);
+            Bitboard attacks = Attacks::bishop_attacks(sq, occupied) & ~occupied;
+            bishop_mobility += popcount(attacks);
+        }
+        score += (our_color == WHITE) ? bishop_mobility * 3 : -bishop_mobility * 3;
+        
+        // Rooks
+        Bitboard rooks = pos.get_pieces(our_color == WHITE ? W_ROOK : B_ROOK);
+        int rook_mobility = 0;
+        while (rooks) {
+            int sq = lsb(rooks);
+            rooks = clear_lsb(rooks);
+            Bitboard attacks = Attacks::rook_attacks(sq, occupied) & ~occupied;
+            rook_mobility += popcount(attacks);
+            
+            // Rook on open/semi-open file bonus
+            int file = file_of(sq);
+            Bitboard file_bb = 0;
+            for (int r = 0; r < 8; r++) {
+                file_bb |= SQ(make_sq(file, r));
+            }
+            Bitboard pawns = pos.get_pieces(our_color == WHITE ? W_PAWN : B_PAWN);
+            Bitboard enemy_pawns = pos.get_pieces(our_color == WHITE ? B_PAWN : W_PAWN);
+            
+            if (!(pawns & file_bb) && !(enemy_pawns & file_bb)) {
+                score += (our_color == WHITE) ? 20 : -20;  // Open file
+            } else if (!(pawns & file_bb)) {
+                score += (our_color == WHITE) ? 10 : -10;  // Semi-open file
+            }
+        }
+        score += (our_color == WHITE) ? rook_mobility * 2 : -rook_mobility * 2;
+        
+        // Queens
+        Bitboard queens = pos.get_pieces(our_color == WHITE ? W_QUEEN : B_QUEEN);
+        int queen_mobility = 0;
+        while (queens) {
+            int sq = lsb(queens);
+            queens = clear_lsb(queens);
+            Bitboard attacks = Attacks::queen_attacks(sq, occupied) & ~occupied;
+            queen_mobility += popcount(attacks);
+        }
+        score += (our_color == WHITE) ? queen_mobility * 1 : -queen_mobility * 1;
+    }
+    
+    return score;
+}
+
+// Evaluate piece coordination
+static int evaluate_piece_coordination(const Position& pos) {
+    int score = 0;
+    
+    // Bishop pair bonus
+    Bitboard white_bishops = pos.get_pieces(W_BISHOP);
+    Bitboard black_bishops = pos.get_pieces(B_BISHOP);
+    
+    if (popcount(white_bishops) >= 2) score += 50;
+    if (popcount(black_bishops) >= 2) score -= 50;
+    
+    // Rook batteries (two rooks on same file)
+    Bitboard white_rooks = pos.get_pieces(W_ROOK);
+    Bitboard black_rooks = pos.get_pieces(B_ROOK);
+    
+    for (int file = 0; file < 8; file++) {
+        Bitboard file_bb = 0;
+        for (int r = 0; r < 8; r++) {
+            file_bb |= SQ(make_sq(file, r));
+        }
+        
+        int white_rooks_on_file = popcount(white_rooks & file_bb);
+        int black_rooks_on_file = popcount(black_rooks & file_bb);
+        
+        if (white_rooks_on_file >= 2) score += 20;
+        if (black_rooks_on_file >= 2) score -= 20;
+    }
+    
+    // Knight outposts
+    for (int color = 0; color < 2; color++) {
+        int knight = (color == WHITE) ? W_KNIGHT : B_KNIGHT;
+        int pawn = (color == WHITE) ? W_PAWN : B_PAWN;
+        Bitboard knights = pos.get_pieces(knight);
+        
+        while (knights) {
+            int sq = lsb(knights);
+            knights = clear_lsb(knights);
+            
+            int rank = rank_of(sq);
+            int file = file_of(sq);
+            
+            // Check if knight is on outpost (rank 4-6 for white, 2-4 for black)
+            bool is_outpost = (color == WHITE && rank >= 3 && rank <= 5) ||
+                           (color == BLACK && rank >= 2 && rank <= 4);
+            
+            if (is_outpost) {
+                // Check if outpost is protected by pawn
+                Bitboard pawn_attacks = Attacks::pawn_attacks(color, sq);
+                Bitboard friendly_pawns = pos.get_pieces(pawn);
+                
+                if (friendly_pawns & pawn_attacks) {
+                    // Check if enemy pawns can attack this square
+                    Bitboard enemy_pawn_attacks = Attacks::pawn_attacks(1 - color, sq);
+                    Bitboard enemy_pawns = pos.get_pieces(color == WHITE ? B_PAWN : W_PAWN);
+                    
+                    if (!(enemy_pawns & enemy_pawn_attacks)) {
+                        score += (color == WHITE) ? 30 : -30;  // Strong outpost
+                    } else {
+                        score += (color == WHITE) ? 15 : -15;  // Protected outpost
+                    }
+                }
+            }
+        }
+    }
+    
+    return score;
+}
+
 // Quiescence search with improved capture ordering and delta pruning
 static int quiescence(Position& pos, int alpha, int beta, int ply = 0) {
     // Limit quiescence depth to prevent stack overflow
-    if (ply >= 8) {
+    if (ply >= 16) {
         return evaluate_position(pos);
     }
     
@@ -2482,7 +2815,6 @@ static int quiescence(Position& pos, int alpha, int beta, int ply = 0) {
         return alpha;
     }
     
-    // Generate captures and checks
     auto captures = pos.generate_captures();
     
     // Score and sort captures using improved move ordering
@@ -2590,6 +2922,44 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta, int ply = 0
         }
     }
     
+    // Probcut pruning
+    if (depth >= 5 && !pos.is_check()) {
+        int probcut_beta = beta + 200;
+        int probcut_depth = depth / 2 - 2;
+        
+        if (probcut_depth >= 1) {
+            // Try captures at reduced depth
+            auto captures = pos.generate_captures();
+            
+            for (const auto& move : captures) {
+                // Only consider captures with positive SEE
+                if (see_capture(pos, move) > 0) {
+                    Position temp_pos = pos;
+                    if (!temp_pos.make_move(move)) continue;
+                    
+                    // Check legality
+                    int our_color = pos.get_side_to_move();
+                    int king_piece = (our_color == WHITE) ? W_KING : B_KING;
+                    Bitboard king_bb = temp_pos.pieces[king_piece];
+                    if (king_bb == 0) continue;
+                    
+                    int king_sq = lsb(king_bb);
+                    if (temp_pos.is_square_attacked(king_sq, 1 - our_color)) {
+                        continue;
+                    }
+                    
+                    // Search at reduced depth
+                    int score = -alpha_beta(temp_pos, probcut_depth, -probcut_beta, -probcut_beta + 1, ply + 1);
+                    
+                    // If we found a cutoff, return it
+                    if (score >= probcut_beta) {
+                        return score;
+                    }
+                }
+            }
+        }
+    }
+    
     // Transposition table lookup
     Bitboard hash = pos.get_hash();
     size_t tt_idx = tt_index(hash);
@@ -2630,6 +3000,11 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta, int ply = 0
                 }
             }
         }
+    }
+    
+    // Apply singular extension if detected
+    if (singular_extension) {
+        depth++;
     }
     
     // Internal Iterative Deepening (IID)
@@ -2739,15 +3114,14 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta, int ply = 0
         // Make move on the copy
         if (!temp_pos.make_move(move)) continue;
         
-        // Legality check: ensure our king is not in check
         Bitboard king_bb = temp_pos.pieces[king_piece];
         if (king_bb == 0) {
-            continue; // King captured
+            continue;
         }
         
         int king_sq = lsb(king_bb);
         if (temp_pos.is_square_attacked(king_sq, 1 - our_color)) {
-            continue; // Illegal move - king in check
+            continue;
         }
         
         moves_searched++;
@@ -2765,16 +3139,15 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta, int ply = 0
             }
         }
         
-        // ===== LATE MOVE REDUCTIONS =====
+        // ===== LATE MOVE REDUCTIONS (Logarithmic LMR) =====
         if (moves_searched > 3 && depth >= 3 &&
             !move.is_capture() && !move.is_promotion() &&
             !temp_pos.is_check() && !temp_pos.is_check()) {
             
-            // Calculate reduction
-            int reduction = 1;
-            if (moves_searched > 6) reduction = 2;
-            if (moves_searched > 12) reduction = 3;
-            if (depth > 6) reduction++;  // Reduce more at high depths
+            // Logarithmic LMR formula
+            int reduction = 1 + (int)std::log(moves_searched);
+            if (depth > 6) reduction++;
+            if (!in_pv) reduction++;  // Reduce more in non-PV nodes
             
             // Ensure we don't reduce below depth 1
             reduction = std::min(reduction, depth - 2);
@@ -2833,7 +3206,6 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta, int ply = 0
                 // to prevent access violations from invalid pv_table lookups
             }
             
-            // Update history heuristic
             int piece = pos.get_piece_at(move.from());
             if (piece >= 1 && piece <= 12) {
                 int from = move.from();
@@ -2842,10 +3214,7 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta, int ply = 0
                 if (from >= 0 && from < 64 && to >= 0 && to < 64) {
                     history_table[piece][from][to] += depth * depth;
                     
-                    // Continuation history disabled to prevent access violations
-                    // from invalid pv_table lookups
                     
-                    // Update capture history
                     if (move.is_capture()) {
                         int victim = pos.get_piece_at(to);
                         if (victim >= 1 && victim <= 12) {
@@ -2853,7 +3222,6 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta, int ply = 0
                         }
                     }
                     
-                    // Age history table to prevent overflow
                     if (history_table[piece][from][to] > 10000) {
                         for (int p = 1; p <= 12; p++) {
                             for (int f = 0; f < 64; f++) {
@@ -2905,6 +3273,14 @@ private:
             return {Move(), -1000000};
         }
         
+        int tactical_count = 0;
+        for (const auto& move : moves) {
+            if (move.is_capture() || move.is_promotion()) {
+                tactical_count++;
+            }
+        }
+        complexity_tracker.tactical_moves_count = tactical_count;
+        
         Move best_move = moves[0];
         int best_score = -1000000;
         
@@ -2929,7 +3305,6 @@ private:
                     }
                 }
                 
-                // Check if we need to re-search
                 if (best_score <= alpha) {
                     alpha -= window;
                     window *= 2;
@@ -2940,7 +3315,6 @@ private:
                     break;  // Success!
                 }
                 
-                // Fallback to full window if aspiration fails
                 if (window > 500) {
                     alpha = -1000000;
                     beta = 1000000;
@@ -2958,12 +3332,10 @@ private:
                     best_score = score;
                     best_move = move;
                 } else if (score == best_score) {
-                    // Tie-breaking: prefer captures, then center moves
                     if (move.is_capture() && !best_move.is_capture()) {
                         best_score = score;
                         best_move = move;
                     } else if (!move.is_capture() && !best_move.is_capture()) {
-                        // Prefer center pawn moves
                         int to_file = file_of(best_move.to());
                         int best_to_file = file_of(best_move.to());
                         if ((to_file == 3 || to_file == 4) && (best_to_file != 3 && best_to_file != 4)) {
@@ -3003,6 +3375,9 @@ public:
     static void iterative_deepening(Position& pos, int max_depth, int time_limit_ms) {
         auto start_time = std::chrono::high_resolution_clock::now();
         
+        complexity_tracker = ComplexityTracker();
+        complexity_tracker.king_safety_score = evaluate_king_safety(pos);
+        
         Move best_move;
         int best_score = 0;
         int prev_score = 0;
@@ -3022,8 +3397,13 @@ public:
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 current_time - start_time).count();
             
-            // FIX: Only check time limit if it's not infinite (-1)
-            if (time_limit_ms > 0 && elapsed >= time_limit_ms) {
+            int adaptive_time_limit = time_limit_ms;
+            if (time_limit_ms > 0) {
+                adaptive_time_limit = complexity_tracker.get_time_allocation();
+                adaptive_time_limit = std::min(adaptive_time_limit, time_limit_ms);
+            }
+            
+            if (adaptive_time_limit > 0 && elapsed >= adaptive_time_limit) {
                 break;
             }
             
@@ -3032,6 +3412,9 @@ public:
             auto result = find_best_move(pos, depth, prev_score);
             Move current_best = result.first;
             int current_score = result.second;
+            
+            complexity_tracker.add_eval_score(current_score);
+            complexity_tracker.add_best_move(current_best);
             
             prev_score = current_score;
             
@@ -3065,8 +3448,6 @@ public:
             best_move = current_best;
             best_score = current_score;
             
-            // For infinite search, continue until max_depth
-            // GUI will send "stop" command to interrupt
         }
         
         std::cout << "info string Search completed: depth=" << search_depth
@@ -3258,7 +3639,6 @@ private:
                     else if (token == "infinite") infinite = true;
                 }
                 
-                // Time management - Dynamic allocation based on game phase
                 if (!infinite && (wtime > 0 || btime > 0)) {
                     int time_ms = (current_position.get_side_to_move() == WHITE) ? wtime : btime;
                     int inc_ms = (current_position.get_side_to_move() == WHITE) ? winc : binc;
@@ -3350,7 +3730,6 @@ int UCI::hash_size_mb = 16;
 // NNUE evaluation
 int Position::evaluate() const {
     if (NNUE::is_loaded()) {
-        // Direct call to NNUE namespace - NO RECURSION!
         return NNUE::evaluate(*this);
     } else {
         // Fallback to classical evaluation if NNUE not loaded
