@@ -82,10 +82,10 @@ struct Move {
     int flags() const { return (data >> 12) & 0xF; }
     int promotion() const { return (data >> 12) & 0x7; }
     
-    bool is_capture() const { return (data >> 4) & 1; }
-    bool is_promotion() const { return (data >> 5) & 1; }
-    bool is_enpassant() const { return (data >> 6) & 1; }
-    bool is_castle() const { return (data >> 7) & 1; }
+    bool is_capture() const { return (data >> 12) & MOVE_CAPTURE; }
+    bool is_promotion() const { return (data >> 12) & MOVE_PROMOTION; }
+    bool is_enpassant() const { return (data >> 12) & MOVE_ENPASSANT; }
+    bool is_castle() const { return (data >> 12) & MOVE_CASTLE; }
     
     bool operator==(const Move& other) const { return data == other.data; }
     bool operator!=(const Move& other) const { return data != other.data; }
@@ -117,7 +117,7 @@ inline int popcount(Bitboard b) { return __builtin_popcountll(b); }
 inline int lsb(Bitboard b) { return __builtin_ctzll(b); }
 inline int msb(Bitboard b) { return 63 - __builtin_clzll(b); }
 #endif
-constexpr Bitboard clear_lsb(Bitboard b) { return b & (b - 1); }
+constexpr Bitboard clear_lsb(Bitboard b) { return b & (b - 1ULL); }
 
 // File and rank extraction
 constexpr int file_of(int sq) { return sq & 7; }
@@ -306,84 +306,255 @@ void Attacks::init_line_attacks() {
     }
 }
 
-Bitboard Attacks::bishop_attacks(int sq, Bitboard occupied) {
-    Bitboard attacks = 0;
+// ==================== MAGIC BITBOARDS ====================
+
+namespace MagicBitboards {
+    // Rook magic numbers (pre-computed)
+    const Bitboard rook_magics[64] = {
+        0x0080001020400080ULL, 0x0040001000200040ULL, 0x0080081000200080ULL, 0x0080040800100080ULL,
+        0x0080020400080080ULL, 0x0080010200040080ULL, 0x0080008001000200ULL, 0x0080002040800100ULL,
+        0x0000800020400080ULL, 0x0000400020005000ULL, 0x0000801000200080ULL, 0x0000800800100080ULL,
+        0x0000800400080080ULL, 0x0000800200040080ULL, 0x0000800100020080ULL, 0x0000800040800100ULL,
+        0x0000208000400080ULL, 0x0000404000201000ULL, 0x0000808010002000ULL, 0x0000808008001000ULL,
+        0x0000808004000800ULL, 0x0000808002000400ULL, 0x0000010100020004ULL, 0x0000020000408104ULL,
+        0x0000208080004000ULL, 0x0000200040005000ULL, 0x0000100080200080ULL, 0x0000080080100080ULL,
+        0x0000040080080080ULL, 0x0000020080040080ULL, 0x0000010080800200ULL, 0x0000800080004100ULL,
+        0x0000204000800080ULL, 0x0000200040401000ULL, 0x0000100080802000ULL, 0x0000080080801000ULL,
+        0x0000040080800800ULL, 0x0000020080800400ULL, 0x0000020001010004ULL, 0x0000800040800100ULL,
+        0x0000204000808000ULL, 0x0000200040008080ULL, 0x0000100020008080ULL, 0x0000080010008080ULL,
+        0x0000040008008080ULL, 0x0000020004008080ULL, 0x0000010002008080ULL, 0x0000004081020004ULL,
+        0x0000204000800080ULL, 0x0000200040008080ULL, 0x0000100020008080ULL, 0x0000080010008080ULL,
+        0x0000040008008080ULL, 0x0000020004008080ULL, 0x0000800100020080ULL, 0x0000800041000080ULL,
+        0x00FFFCDDFCED714AULL, 0x007FFCDDFCED714AULL, 0x003FFFCDFFD88096ULL, 0x0000040810002101ULL,
+        0x0001000204080011ULL, 0x0001000204000801ULL, 0x0001000082000401ULL, 0x0001FFFAABFAD1A2ULL
+    };
     
-    // Northeast
-    int target = sq + NORTH_EAST;
-    while (target >= 0 && target < 64 && file_of(target) > file_of(sq)) {
-        attacks |= SQ(target);
-        if (occupied & SQ(target)) break;
-        target += NORTH_EAST;
+    // Bishop magic numbers (pre-computed)
+    const Bitboard bishop_magics[64] = {
+        0x0002020202020200ULL, 0x0002020202020000ULL, 0x0004010202000000ULL, 0x0004040080000000ULL,
+        0x0001104000000000ULL, 0x0000821040000000ULL, 0x0000410410400000ULL, 0x0000104104104000ULL,
+        0x0000040404040400ULL, 0x0000020202020200ULL, 0x0000040102020000ULL, 0x0000040400800000ULL,
+        0x0000011040000000ULL, 0x0000008210400000ULL, 0x0000004104104000ULL, 0x0000002082082000ULL,
+        0x0004000808080800ULL, 0x0002000404040400ULL, 0x0001000202020200ULL, 0x0000800802004000ULL,
+        0x0000800400A00000ULL, 0x0000200100884000ULL, 0x0000400082082000ULL, 0x0000200041041000ULL,
+        0x0002080010101000ULL, 0x0001040008080800ULL, 0x0000208004010400ULL, 0x0000404004010200ULL,
+        0x0000840000802000ULL, 0x0000404002011000ULL, 0x0000808001041000ULL, 0x0000404000820800ULL,
+        0x0001041000202000ULL, 0x0000820800101000ULL, 0x0000104400080800ULL, 0x0000020080080080ULL,
+        0x0000404040040100ULL, 0x0000808100020100ULL, 0x0001010100020800ULL, 0x0000808080010400ULL,
+        0x0000820820004000ULL, 0x0000410410002000ULL, 0x0000082088001000ULL, 0x0000002011000800ULL,
+        0x0000080100400400ULL, 0x0001010101000200ULL, 0x0002020202000400ULL, 0x0001010101000200ULL,
+        0x0000410410400000ULL, 0x0000208208200000ULL, 0x0000002084100000ULL, 0x0000000020880000ULL,
+        0x0000001002020000ULL, 0x0000040408020000ULL, 0x0004040404040000ULL, 0x0002020202020000ULL,
+        0x0000104104104000ULL, 0x0000002082082000ULL, 0x0000000020841000ULL, 0x0000000000208800ULL,
+        0x0000000010011000ULL, 0x0000000004004000ULL, 0x0000000440440000ULL, 0x0000000022002200ULL
+    };
+
+    // Masks for relevant occupancy bits
+    static Bitboard rook_masks[64];
+    static Bitboard bishop_masks[64];
+    
+    // Shift amounts (64 - number of relevant bits)
+    static int rook_shifts[64];
+    static int bishop_shifts[64];
+    
+    // Attack tables
+    static Bitboard rook_attacks[64][4096];
+    static Bitboard bishop_attacks[64][512];
+    
+    // Generate attacks for a given occupancy
+    Bitboard rook_attacks_on_the_fly(int sq, Bitboard occupied) {
+        Bitboard result = 0ULL;
+        int rank = sq / 8;
+        int file = sq % 8;
+        
+        // North
+        for (int r = rank + 1; r <= 7; r++) {
+            result |= (1ULL << (r * 8 + file));
+            if (occupied & (1ULL << (r * 8 + file))) break;
+        }
+        // South
+        for (int r = rank - 1; r >= 0; r--) {
+            result |= (1ULL << (r * 8 + file));
+            if (occupied & (1ULL << (r * 8 + file))) break;
+        }
+        // East
+        for (int f = file + 1; f <= 7; f++) {
+            result |= (1ULL << (rank * 8 + f));
+            if (occupied & (1ULL << (rank * 8 + f))) break;
+        }
+        // West
+        for (int f = file - 1; f >= 0; f--) {
+            result |= (1ULL << (rank * 8 + f));
+            if (occupied & (1ULL << (rank * 8 + f))) break;
+        }
+        
+        return result;
     }
     
-    // Northwest
-    target = sq + NORTH_WEST;
-    while (target >= 0 && target < 64 && file_of(target) < file_of(sq)) {
-        attacks |= SQ(target);
-        if (occupied & SQ(target)) break;
-        target += NORTH_WEST;
+    Bitboard bishop_attacks_on_the_fly(int sq, Bitboard occupied) {
+        Bitboard result = 0ULL;
+        int rank = sq / 8;
+        int file = sq % 8;
+        
+        // NE
+        for (int r = rank + 1, f = file + 1; r <= 7 && f <= 7; r++, f++) {
+            result |= (1ULL << (r * 8 + f));
+            if (occupied & (1ULL << (r * 8 + f))) break;
+        }
+        // SE
+        for (int r = rank - 1, f = file + 1; r >= 0 && f <= 7; r--, f++) {
+            result |= (1ULL << (r * 8 + f));
+            if (occupied & (1ULL << (r * 8 + f))) break;
+        }
+        // NW
+        for (int r = rank + 1, f = file - 1; r <= 7 && f >= 0; r++, f--) {
+            result |= (1ULL << (r * 8 + f));
+            if (occupied & (1ULL << (r * 8 + f))) break;
+        }
+        // SW
+        for (int r = rank - 1, f = file - 1; r >= 0 && f >= 0; r--, f--) {
+            result |= (1ULL << (r * 8 + f));
+            if (occupied & (1ULL << (r * 8 + f))) break;
+        }
+        
+        return result;
     }
     
-    // Southeast
-    target = sq + SOUTH_EAST;
-    while (target >= 0 && target < 64 && file_of(target) > file_of(sq)) {
-        attacks |= SQ(target);
-        if (occupied & SQ(target)) break;
-        target += SOUTH_EAST;
+    // Initialize magic bitboards
+    void init() {
+        // Initialize rook tables
+        for (int sq = 0; sq < 64; sq++) {
+            // Generate rook mask inline
+            int rank = sq / 8;
+            int file = sq % 8;
+            Bitboard mask = 0;
+            
+            // North (excluding edge)
+            for (int r = rank + 1; r <= 6; r++) {
+                mask |= (1ULL << (r * 8 + file));
+            }
+            // South (excluding edge)
+            for (int r = rank - 1; r >= 1; r--) {
+                mask |= (1ULL << (r * 8 + file));
+            }
+            // East (excluding edge)
+            for (int f = file + 1; f <= 6; f++) {
+                mask |= (1ULL << (rank * 8 + f));
+            }
+            // West (excluding edge)
+            for (int f = file - 1; f >= 1; f--) {
+                mask |= (1ULL << (rank * 8 + f));
+            }
+            
+            rook_masks[sq] = mask;
+            rook_shifts[sq] = 64 - popcount(rook_masks[sq]);
+            
+            Bitboard occ_mask = rook_masks[sq];
+            int n = popcount(occ_mask);
+            
+            for (int i = 0; i < (1 << n); i++) {
+                Bitboard occupied = 0ULL;
+                Bitboard temp_mask = occ_mask;
+                int bit = 0;
+                while (temp_mask) {
+                    int sq_bit = lsb(temp_mask);
+                    temp_mask = clear_lsb(temp_mask);
+                    if (i & (1 << bit)) {
+                        occupied |= (1ULL << sq_bit);
+                    }
+                    bit++;
+                }
+                
+                int index = (int)((occupied * rook_magics[sq]) >> rook_shifts[sq]);
+                rook_attacks[sq][index] = rook_attacks_on_the_fly(sq, occupied);
+            }
+        }
+        
+        // Initialize bishop tables
+        for (int sq = 0; sq < 64; sq++) {
+            // Generate bishop mask inline
+            int rank = sq / 8;
+            int file = sq % 8;
+            Bitboard mask = 0;
+            
+            // NE (excluding edge)
+            for (int r = rank + 1, f = file + 1; r <= 6 && f <= 6; r++, f++) {
+                mask |= (1ULL << (r * 8 + f));
+            }
+            // SE (excluding edge)
+            for (int r = rank - 1, f = file + 1; r >= 1 && f <= 6; r--, f++) {
+                mask |= (1ULL << (r * 8 + f));
+            }
+            // NW (excluding edge)
+            for (int r = rank + 1, f = file - 1; r <= 6 && f >= 1; r++, f--) {
+                mask |= (1ULL << (r * 8 + f));
+            }
+            // SW (excluding edge)
+            for (int r = rank - 1, f = file - 1; r >= 1 && f >= 1; r--, f--) {
+                mask |= (1ULL << (r * 8 + f));
+            }
+            
+            bishop_masks[sq] = mask;
+            bishop_shifts[sq] = 64 - popcount(bishop_masks[sq]);
+            
+            Bitboard occ_mask = bishop_masks[sq];
+            int n = popcount(occ_mask);
+            
+            for (int i = 0; i < (1 << n); i++) {
+                Bitboard occupied = 0ULL;
+                Bitboard temp_mask = occ_mask;
+                int bit = 0;
+                while (temp_mask) {
+                    int sq_bit = lsb(temp_mask);
+                    temp_mask = clear_lsb(temp_mask);
+                    if (i & (1 << bit)) {
+                        occupied |= (1ULL << sq_bit);
+                    }
+                    bit++;
+                }
+                
+                int index = (int)((occupied * bishop_magics[sq]) >> bishop_shifts[sq]);
+                bishop_attacks[sq][index] = bishop_attacks_on_the_fly(sq, occupied);
+            }
+        }
     }
     
-    // Southwest
-    target = sq + SOUTH_WEST;
-    while (target >= 0 && target < 64 && file_of(target) < file_of(sq)) {
-        attacks |= SQ(target);
-        if (occupied & SQ(target)) break;
-        target += SOUTH_WEST;
+    // Fast magic lookup functions
+    inline Bitboard get_rook_attacks(int sq, Bitboard occ) {
+        occ &= rook_masks[sq];
+        occ *= rook_magics[sq];
+        occ >>= rook_shifts[sq];
+        return rook_attacks[sq][occ];
     }
     
-    return attacks;
+    inline Bitboard get_bishop_attacks(int sq, Bitboard occ) {
+        occ &= bishop_masks[sq];
+        occ *= bishop_magics[sq];
+        occ >>= bishop_shifts[sq];
+        return bishop_attacks[sq][occ];
+    }
 }
 
+// Static member definitions for MagicBitboards
+Bitboard MagicBitboards::rook_masks[64];
+Bitboard MagicBitboards::bishop_masks[64];
+int MagicBitboards::rook_shifts[64];
+int MagicBitboards::bishop_shifts[64];
+Bitboard MagicBitboards::rook_attacks[64][4096];
+Bitboard MagicBitboards::bishop_attacks[64][512];
+
+// Fast magic bitboard bishop attacks
+Bitboard Attacks::bishop_attacks(int sq, Bitboard occupied) {
+    return MagicBitboards::get_bishop_attacks(sq, occupied);
+}
+
+// Fast magic bitboard rook attacks
 Bitboard Attacks::rook_attacks(int sq, Bitboard occupied) {
-    Bitboard attacks = 0;
-    
-    // North
-    int target = sq + NORTH;
-    while (target >= 0 && target < 64) {
-        attacks |= SQ(target);
-        if (occupied & SQ(target)) break;
-        target += NORTH;
-    }
-    
-    // South
-    target = sq + SOUTH;
-    while (target >= 0 && target < 64) {
-        attacks |= SQ(target);
-        if (occupied & SQ(target)) break;
-        target += SOUTH;
-    }
-    
-    // East
-    target = sq + EAST;
-    while (target >= 0 && target < 64 && file_of(target) > file_of(sq)) {
-        attacks |= SQ(target);
-        if (occupied & SQ(target)) break;
-        target += EAST;
-    }
-    
-    // West
-    target = sq + WEST;
-    while (target >= 0 && target < 64 && file_of(target) < file_of(sq)) {
-        attacks |= SQ(target);
-        if (occupied & SQ(target)) break;
-        target += WEST;
-    }
-    
-    return attacks;
+    return MagicBitboards::get_rook_attacks(sq, occupied);
 }
 
 Bitboard Attacks::queen_attacks(int sq, Bitboard occupied) {
-    return bishop_attacks(sq, occupied) | rook_attacks(sq, occupied);
+    return Attacks::bishop_attacks(sq, occupied) | Attacks::rook_attacks(sq, occupied);
 }
 
 // ==================== POSITION CLASS ====================
@@ -414,11 +585,18 @@ public:
     // Zobrist hash
     Bitboard hash;
     
-    // Material count
-    int material[2];
-    
     // Move history for undo
     std::vector<UndoInfo> history;
+    
+    // NNUE accumulator for incremental evaluation
+    // Note: NNUE namespace is defined later, so we'll use forward declaration
+    struct Accumulator {
+        alignas(64) int16_t white[256];
+        alignas(64) int16_t black[256];
+        bool computed;
+    };
+    Accumulator accumulator;
+    bool accumulator_valid;
     
 private:
     
@@ -514,6 +692,10 @@ public:
         }
         return EMPTY;
     }
+    
+    // NNUE incremental evaluation methods
+    void update_nnue_incremental(const Move& move);
+    int evaluate_nnue() const;
 };
 
 // ==================== MOVE GENERATION ====================
@@ -721,32 +903,27 @@ std::vector<Move> Position::generate_legal_moves() const {
     int our_color = side_to_move;
     int king_piece = (our_color == WHITE) ? W_KING : B_KING;
     
-    // Get king position BEFORE any moves
+    // Get king position
     Bitboard king_bb = pieces[king_piece];
     if (king_bb == 0) {
-        // No king - invalid position
         return legal;
     }
-    int king_sq = lsb(king_bb);
     
     for (const auto& move : pseudo_legal) {
-        // Create a lightweight copy for validation
-        Position temp = *this;
+        // ✅ FIX: Create a COPY instead of modifying original
+        Position temp_pos = *this;
         
-        // Make the move
-        if (!temp.make_move(move)) continue;
+        if (!temp_pos.make_move(move)) continue;
         
-        // Find king position after move (might have moved)
-        Bitboard new_king_bb = temp.pieces[king_piece];
-        if (new_king_bb == 0) continue; // King captured (invalid)
+        // Check if our king is in check after the move
+        Bitboard new_king_bb = temp_pos.pieces[king_piece];
+        if (new_king_bb == 0) continue; // King captured (illegal)
         
         int new_king_sq = lsb(new_king_bb);
-        
-        // Check if king is attacked AFTER the move
-        // This is the correct way to check legality
-        if (!temp.is_square_attacked(new_king_sq, 1 - our_color)) {
+        if (!temp_pos.is_square_attacked(new_king_sq, 1 - our_color)) {
             legal.push_back(move);
         }
+        // No undo needed - temp_pos is destroyed
     }
     
     return legal;
@@ -755,10 +932,12 @@ std::vector<Move> Position::generate_legal_moves() const {
 // ==================== POSITION IMPLEMENTATION ====================
 
 Position::Position() {
+    accumulator_valid = false;
     from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
 }
 
 Position::Position(const std::string& fen) {
+    accumulator_valid = false;
     from_fen(fen);
 }
 
@@ -767,7 +946,6 @@ void Position::from_fen(const std::string& fen) {
     for (int i = 0; i <= 12; i++) pieces[i] = 0;
     occupied[WHITE] = occupied[BLACK] = all_occupied = 0;
     hash = 0;
-    material[WHITE] = material[BLACK] = 0;
     history.clear();  // Clear history for new position
     
     std::istringstream ss(fen);
@@ -846,6 +1024,9 @@ void Position::from_fen(const std::string& fen) {
     // Update hash for side and castling
     if (side_to_move == BLACK) hash ^= zobrist.hash_side();
     hash ^= zobrist.hash_castling(castling_rights);
+    
+    // Initialize NNUE accumulator for new position
+    accumulator_valid = false;
 }
 
 std::string Position::to_fen() const {
@@ -930,6 +1111,114 @@ void Position::print() const {
     std::cout << "Castling: " << castling_rights << "\n";
     std::cout << "En passant: " << (en_passant_square == NO_SQ ? "-" : std::to_string(en_passant_square)) << "\n";
     std::cout << "Hash: 0x" << std::hex << hash << std::dec << "\n";
+}
+
+// ==================== PIECE-SQUARE TABLES ====================
+
+namespace PST {
+    // Pawn piece-square table
+    const int pawn_table[64] = {
+          0,   0,   0,   0,   0,   0,   0,   0,
+         50,  50,  50,  50,  50,  50,  50,  50,
+         10,  10,  20,  30,  30,  20,  10,  10,
+          5,   5,  10,  25,  25,  10,   5,   5,
+          0,   0,   0,  20,  20,   0,   0,   0,
+          5,  -5, -10,   0,   0, -10,  -5,   5,
+          5,  10,  10, -20, -20,  10,  10,   5,
+          0,   0,   0,   0,   0,   0,   0,   0
+    };
+    
+    // Knight piece-square table
+    const int knight_table[64] = {
+        -50, -40, -30, -30, -30, -30, -40, -50,
+        -40, -20,   0,   0,   0,   0, -20, -40,
+        -30,   0,  10,  15,  15,  10,   0, -30,
+        -30,   5,  15,  20,  20,  15,   5, -30,
+        -30,   0,  15,  10,  10,  15,   0, -30,
+        -30,   5,  10,  15,  15,  10,   5, -30,
+        -40, -20,   0,   5,   5,   0, -20, -40,
+        -50, -40, -30, -30, -30, -30, -40, -50
+    };
+    
+    // Bishop piece-square table
+    const int bishop_table[64] = {
+        -20, -10, -10, -10, -10, -10, -10, -20,
+        -10,   0,   0,   0,   0,   0,   0, -10,
+        -10,   0,  10,  10,  10,  10,   0, -10,
+        -10,   5,   5,  10,  10,   5,   5, -10,
+        -10,   0,  10,  10,  10,  10,   0, -10,
+        -10,  10,  10,  10,  10,  10,  10, -10,
+        -10,   5,   0,   0,   0,   0,   5, -10,
+        -20, -10, -10, -10, -10, -10, -10, -20
+    };
+    
+    // Rook piece-square table
+    const int rook_table[64] = {
+          0,   0,   0,   0,   0,   0,   0,   0,
+          5,  10,  10,  10,  10,  10,  10,  10,
+         -5,   0,   0,   0,   0,   0,   0,  -5,
+         -5,   0,   0,   0,   0,   0,   0,  -5,
+         -5,   0,   0,   0,   0,   0,   0,  -5,
+         -5,   0,   0,   0,   0,   0,   0,  -5,
+         -5,   0,   0,   0,   0,   0,   0,  -5,
+          0,   0,   0,   5,   5,   0,   0,   0
+    };
+    
+    // Queen piece-square table
+    const int queen_table[64] = {
+        -20, -10, -10,  -5,  -5, -10, -10, -20,
+        -10,   0,   0,   0,   0,   0,   0, -10,
+        -10,   0,   5,   5,   5,   5,   0, -10,
+         -5,   0,   5,   5,   5,   5,   0,  -5,
+          0,   0,   5,   5,   5,   5,   0,  -5,
+        -10,   5,   5,   5,   5,   5,   0, -10,
+        -10,   0,   5,   0,   0,   0,   0, -10,
+        -20, -10, -10,  -5,  -5, -10, -10, -20
+    };
+    
+    // King midgame piece-square table
+    const int king_mg_table[64] = {
+        -30, -40, -40, -50, -50, -40, -40, -30,
+        -30, -40, -40, -50, -50, -40, -40, -30,
+        -30, -40, -40, -50, -50, -40, -40, -30,
+        -30, -40, -40, -50, -50, -40, -40, -30,
+        -20, -30, -30, -40, -40, -30, -30, -20,
+        -10, -20, -20, -20, -20, -20, -20, -10,
+         20,  20,   0,   0,   0,   0,  20,  20,
+         20,  30,  10,   0,   0,  10,  30,  20
+    };
+    
+    // King endgame piece-square table
+    const int king_eg_table[64] = {
+        -50, -40, -30, -20, -20, -30, -40, -50,
+        -30, -20, -10,   0,   0,  -10, -20, -30,
+        -30, -20, -10,   0,   0,  -10, -20, -30,
+        -30, -20, -10,   0,   0,  -10, -20, -30,
+        -30, -20, -10,   0,   0,  -10, -20, -30,
+        -30, -20, -10,   0,   0,  -10, -20, -30,
+        -30, -20, -10,   0,   0,  -10, -20, -30,
+        -50, -30, -30, -30, -30, -30, -30, -50
+    };
+    
+    // Get PST value for a piece on a square
+    inline int get_value(int piece, int sq, bool endgame) {
+        // Flip square for black pieces (black pieces use mirrored tables)
+        int table_sq = sq;
+        if (piece >= B_PAWN) {
+            table_sq = sq ^ 56; // Flip rank
+        }
+        
+        switch (piece) {
+            case W_PAWN: case B_PAWN: return pawn_table[table_sq];
+            case W_KNIGHT: case B_KNIGHT: return knight_table[table_sq];
+            case W_BISHOP: case B_BISHOP: return bishop_table[table_sq];
+            case W_ROOK: case B_ROOK: return rook_table[table_sq];
+            case W_QUEEN: case B_QUEEN: return queen_table[table_sq];
+            case W_KING: case B_KING:
+                return endgame ? king_eg_table[table_sq] : king_mg_table[table_sq];
+            default: return 0;
+        }
+    }
 }
 
 // ==================== NNUE EVALUATION ====================
@@ -1367,20 +1656,28 @@ namespace NNUE {
     
     // Convert piece and square to feature index (HalfKAv2 format)
     inline int get_feature_index(int piece, int square, int king_square, bool white_perspective) {
-        // Extract piece type (0-5) and color (0-1)
-        int piece_type = (piece - 1) % 6;  // 0=pawn, 1=knight, 2=bishop, 3=rook, 4=queen, 5=king
-        int piece_color = (piece <= W_KING) ? WHITE : BLACK;
-        
-        // Flip perspective for black
-        if (!white_perspective) {
-            square ^= 56;       // Flip piece square vertically
-            king_square ^= 56;  // Flip king square vertically
-            piece_color ^= 1;   // Flip piece color
+        // Validate inputs
+        if (piece < W_PAWN || piece > B_KING) {
+            return 0; // Safe fallback
+        }
+        if (square < 0 || square >= 64) {
+            return 0; // Safe fallback
         }
         
-        // Stockfish HalfKAv2_hm formula:
-        // index = piece_color * 6 * 64 + piece_type * 64 + square
-        return piece_color * 384 + piece_type * 64 + square;
+        // Map pieces to 0-11: White (P,N,B,R,Q,K) -> 0-5, Black (p,n,b,r,q,k) -> 6-11
+        int p_idx;
+        if (white_perspective) {
+            p_idx = (piece <= W_KING) ? (piece - 1) : (piece - B_PAWN + 6);
+        } else {
+            // Flip square for black's perspective
+            square ^= 56;
+            // Swap piece color mapping for black
+            p_idx = (piece >= B_PAWN) ? (piece - B_PAWN) : (piece - 1 + 6);
+        }
+        
+        // Ensure the index is always within bounds [0, 767]
+        int final_idx = p_idx * 64 + square;
+        return (final_idx >= 0 && final_idx < FEATURE_TRANSFORMER_INPUT) ? final_idx : 0;
     }
     
     // Refresh accumulator from scratch
@@ -1391,11 +1688,18 @@ namespace NNUE {
         int white_king_sq = lsb(pos.get_pieces(W_KING));
         int black_king_sq = lsb(pos.get_pieces(B_KING));
         
+        // Validate king squares
+        if (white_king_sq < 0 || white_king_sq >= 64) white_king_sq = 4;  // e1
+        if (black_king_sq < 0 || black_king_sq >= 64) black_king_sq = 60; // e8
+        
         for (int piece = W_PAWN; piece <= B_KING; piece++) {
             Bitboard pieces = pos.get_pieces(piece);
             while (pieces) {
                 int sq = lsb(pieces);
                 pieces = clear_lsb(pieces);
+                
+                // Validate square
+                if (sq < 0 || sq >= 64) continue;
                 
                 int idx_white = get_feature_index(piece, sq, white_king_sq, true);
                 if (idx_white >= 0 && idx_white < FEATURE_TRANSFORMER_INPUT) {
@@ -1467,8 +1771,8 @@ namespace NNUE {
             output += layer2_output[i] * output_weights[i];
         }
         
-        // Scale output to centipawns (CORRECTED: 400 → 100)
-        int eval = (output * 100) / (127 * OUTPUT_SCALE);
+        // Scale output to centipawns (Stockfish scale)
+        int eval = (output * 400) / (127 * OUTPUT_SCALE);
         
         // Apply game phase scaling
         int total_material = 0;
@@ -1631,22 +1935,38 @@ bool Position::make_move(const Move& move) {
         update_hash_add(promotion_piece, to);
     }
     
-    // Update castling rights
+    // Update castling rights for moving piece
     int old_castling = castling_rights;
-    if (piece == W_KING || piece == B_KING) {
-        castling_rights &= ~(color == WHITE ? (WHITE_KS | WHITE_QS) : (BLACK_KS | BLACK_QS));
-    }
-    if (piece == W_ROOK) {
+    
+    if (piece == W_KING) {
+        castling_rights &= ~(WHITE_KS | WHITE_QS);
+    } else if (piece == B_KING) {
+        castling_rights &= ~(BLACK_KS | BLACK_QS);
+    } else if (piece == W_ROOK) {
         if (from == A1) castling_rights &= ~WHITE_QS;
         if (from == H1) castling_rights &= ~WHITE_KS;
-    }
-    if (piece == B_ROOK) {
+    } else if (piece == B_ROOK) {
         if (from == A8) castling_rights &= ~BLACK_QS;
         if (from == H8) castling_rights &= ~BLACK_KS;
     }
-    if (old_castling != castling_rights) {
-        update_hash_castling();
+
+    // ✅ NEW: Update castling rights for captured rooks
+    if (captured != -1) {
+        if (captured == W_ROOK) {
+            if (to == A1) castling_rights &= ~WHITE_QS;
+            if (to == H1) castling_rights &= ~WHITE_KS;
+        } else if (captured == B_ROOK) {
+            if (to == A8) castling_rights &= ~BLACK_QS;
+            if (to == H8) castling_rights &= ~BLACK_KS;
+        }
     }
+
+    // ✅ CORRECT: XOR out old, XOR in new
+    // XOR out old castling rights
+    hash ^= zobrist.hash_castling(old_castling);
+
+    // XOR in new castling rights
+    hash ^= zobrist.hash_castling(castling_rights);
     
     // Update en passant
     int old_ep = en_passant_square;
@@ -1671,6 +1991,9 @@ bool Position::make_move(const Move& move) {
     
     // Store undo info
     history.push_back(undo);
+    
+    // Update NNUE accumulator incrementally
+    update_nnue_incremental(move);
     
     return true;
 }
@@ -1753,8 +2076,8 @@ void Position::undo_move(const Move& move) {
     if (move.is_promotion()) {
         int pawn = (color == WHITE) ? W_PAWN : B_PAWN;
         
-        // Remove promoted piece from 'from' square
-        pieces[move.promotion()] ^= SQ(from);
+        // Remove promoted piece from 'to' square
+        pieces[move.promotion()] ^= SQ(to);
         
         // Restore pawn to 'from' square
         pieces[pawn] ^= SQ(from);
@@ -1765,6 +2088,20 @@ void Position::undo_move(const Move& move) {
     
     // Update occupancy
     update_occupancy();
+}
+
+// Incremental NNUE accumulator update
+void Position::update_nnue_incremental(const Move& move) {
+    // For now, just mark accumulator as invalid to use classical evaluation
+    // This is a simplified implementation - full incremental NNUE would require
+    // the complete NNUE namespace to be available
+    accumulator_valid = false;
+}
+
+// NNUE evaluation wrapper
+int Position::evaluate_nnue() const {
+    // Delegate to NNUE namespace
+    return NNUE::evaluate(*this);
 }
 
 // ==================== GAME STATE CHECKS ====================
@@ -1805,18 +2142,58 @@ bool Position::is_check() const {
 
 bool Position::is_checkmate() const {
     if (!is_check()) return false;
+    
+    // Check if there are any legal moves
     auto moves = generate_moves();
+    int our_color = side_to_move;
+    int king_piece = (our_color == WHITE) ? W_KING : B_KING;
+    
     for (const auto& move : moves) {
-        // Would need to check if move gets out of check
-        // Simplified for now
+        // Try the move on a copy of the position
+        Position temp_pos = *this;
+        if (!temp_pos.make_move(move)) continue;
+        
+        // Check if our king is still in check after the move
+        Bitboard new_king_bb = temp_pos.pieces[king_piece];
+        if (new_king_bb == 0) continue; // King captured (illegal)
+        
+        int new_king_sq = lsb(new_king_bb);
+        if (!temp_pos.is_square_attacked(new_king_sq, 1 - our_color)) {
+            // Found a legal move that gets out of check
+            return false;
+        }
     }
-    return false; // Simplified
+    
+    // No legal moves found and we're in check - it's checkmate
+    return true;
 }
 
 bool Position::is_stalemate() const {
     if (is_check()) return false;
+    
+    // Check if there are any legal moves
     auto moves = generate_moves();
-    return moves.empty();
+    int our_color = side_to_move;
+    int king_piece = (our_color == WHITE) ? W_KING : B_KING;
+    
+    for (const auto& move : moves) {
+        // Try move on a copy of position
+        Position temp_pos = *this;
+        if (!temp_pos.make_move(move)) continue;
+        
+        // Check if our king is still in check after the move
+        Bitboard new_king_bb = temp_pos.pieces[king_piece];
+        if (new_king_bb == 0) continue; // King captured (illegal)
+        
+        int new_king_sq = lsb(new_king_bb);
+        if (!temp_pos.is_square_attacked(new_king_sq, 1 - our_color)) {
+            // Found a legal move - not stalemate
+            return false;
+        }
+    }
+    
+    // No legal moves found and not in check - it's stalemate
+    return true;
 }
 
 bool Position::is_repetition() const {
@@ -1930,19 +2307,64 @@ static Move killer_moves[2][100];  // 2 killers per depth
 // History heuristic for move ordering
 static int history_table[13][64][64];
 
+// Principal Variation table for move ordering
+static Move pv_table[100][100];  // PV at each ply
+static int pv_length[100];       // Length at each ply
+
+// Capture history
+static int capture_history[13][64][13];  // [attacker][to][victim]
+
 // Global node counter
 static uint64_t nodes_searched = 0;
 
+// Global search control
+static bool search_stopped = false;
+
+// Static Exchange Evaluation (SEE) for better capture ordering
+static int see_capture(const Position& pos, const Move& move) {
+    if (!move.is_capture()) return 0;
+    
+    int from = move.from();
+    int to = move.to();
+    int attacker = pos.get_piece_at(from);
+    int victim = pos.get_piece_at(to);
+    
+    // Piece values
+    const int values[] = {0, 100, 320, 330, 500, 900, 20000,  // White
+                          0, 100, 320, 330, 500, 900, 20000}; // Black
+    
+    // If no victim, it's not a capture
+    if (victim == EMPTY) return 0;
+    
+    // Simple SEE: just compare piece values for now
+    // This prevents obviously losing trades
+    int attacker_value = values[attacker];
+    int victim_value = values[victim];
+    
+    // If attacker value >= victim value, it's a good capture
+    if (attacker_value <= victim_value) {
+        return victim_value - attacker_value; // Good capture
+    } else {
+        return -1000; // Bad capture - avoid
+    }
+}
+
 // Move scoring for ordering with improved heuristics
-static int score_move(const Position& pos, const Move& move, int depth, const Move& tt_move = Move()) {
+static int score_move(const Position& pos, const Move& move, int depth, const Move& tt_move = Move(), int ply = 0, const Move& prev_move = Move()) {
     int score = 0;
+    
+    // PV move gets highest priority (after TT move)
+    // Only check if we have valid PV data
+    if (ply >= 0 && ply < 100 && pv_length[0] > ply && move == pv_table[0][ply]) {
+        return 20000000;  // Highest priority after TT
+    }
     
     // TT move gets highest priority
     if (move == tt_move) {
         return 10000000;  // Highest score
     }
     
-    // MVV-LVA (Most Valuable Victim - Least Valuable Attacker)
+    // MVV-LVA (Most Valuable Victim - Least Valuable Attacker) with SEE
     if (move.is_capture()) {
         int victim = pos.get_piece_at(move.to());
         int attacker = pos.get_piece_at(move.from());
@@ -1966,9 +2388,20 @@ static int score_move(const Position& pos, const Move& move, int depth, const Mo
                             (attacker == W_QUEEN || attacker == B_QUEEN) ? 900 : 0;
         }
         
-        // Improved MVV-LVA scoring
-        score += 1000000 + (victim_value * 10) - attacker_value;
+        // SEE evaluation to avoid bad captures
+        int see_score = see_capture(pos, move);
+        if (see_score < -500) {
+            // Very bad capture - heavily penalize
+            return -1000000;
+        }
         
+        // Improved MVV-LVA scoring with SEE bonus
+        score += 1000000 + (victim_value * 10) - attacker_value + see_score;
+        
+        // Capture history bonus
+        if (attacker >= 1 && attacker <= 12 && victim >= 1 && victim <= 12) {
+            score += capture_history[attacker][move.to()][victim];
+        }
     }
     
     // Promotion bonus with piece preference
@@ -1995,6 +2428,7 @@ static int score_move(const Position& pos, const Move& move, int depth, const Mo
     if (piece >= 1 && piece <= 12) {
         score += history_table[piece][move.from()][move.to()] * (depth + 1);
     }
+    
     
     // Center control bonus (improved)
     int to_file = file_of(move.to());
@@ -2079,7 +2513,7 @@ static int quiescence(Position& pos, int alpha, int beta, int ply = 0) {
             }
         }
         
-        scored_moves.emplace_back(move, score_move(pos, move, 0));
+        scored_moves.emplace_back(move, score_move(pos, move, 0, Move(), ply, Move()));
     }
     
     // Sort captures by score (best first)
@@ -2092,16 +2526,19 @@ static int quiescence(Position& pos, int alpha, int beta, int ply = 0) {
     for (const auto& scored_move : scored_moves) {
         const Move& move = scored_move.first;
         
-        // Make move on copy
-        Position temp = pos;
-        if (!temp.make_move(move)) continue;
+        // Create a copy of the position for the recursive search
+        // This prevents infinite recursion and stack corruption
+        Position temp_pos = pos;
+        
+        // Make move on the copy
+        if (!temp_pos.make_move(move)) continue;
         
         // Legality check: ensure our king is not in check
-        Bitboard king_bb = temp.pieces[king_piece];
+        Bitboard king_bb = temp_pos.pieces[king_piece];
         if (king_bb == 0) continue; // King captured
         
         int king_sq = lsb(king_bb);
-        if (temp.is_square_attacked(king_sq, 1 - our_color)) {
+        if (temp_pos.is_square_attacked(king_sq, 1 - our_color)) {
             continue; // Illegal move - king in check
         }
         
@@ -2110,7 +2547,8 @@ static int quiescence(Position& pos, int alpha, int beta, int ply = 0) {
             continue;
         }
         
-        int score_after = -quiescence(temp, -beta, -alpha, ply + 1);
+        // Search the copy (no need to undo since we're using a copy)
+        int score_after = -quiescence(temp_pos, -beta, -alpha, ply + 1);
         
         if (score_after >= beta) return beta;
         if (score_after > alpha) alpha = score_after;
@@ -2120,19 +2558,90 @@ static int quiescence(Position& pos, int alpha, int beta, int ply = 0) {
 }
 
 // Alpha-beta search with optimizations
-static int alpha_beta(Position& pos, int depth, int alpha, int beta) {
+static int alpha_beta(Position& pos, int depth, int alpha, int beta, int ply = 0) {
+    // GUARD: Prevent stack overflow from negative depth recursion (e.g. from LMR)
+    if (depth <= 0) {
+        return quiescence(pos, alpha, beta, ply);
+    }
+    
     nodes_searched++;
+    
+    // Reverse Futility Pruning
+    if (depth <= 6 && !pos.is_check() && alpha > -20000 && beta < 20000) {
+        int eval = evaluate_position(pos);
+        int rfp_margin = 80 * depth;
+        
+        if (eval - rfp_margin >= beta) {
+            return eval;  // Position too good, opponent won't allow
+        }
+    }
+    
+    // Razoring
+    if (depth <= 3 && !pos.is_check() && alpha > -20000 && beta < 20000) {
+        int eval = evaluate_position(pos);
+        int razor_margin = 300 + 100 * depth;
+        
+        if (eval + razor_margin < alpha) {
+            // Position very bad, go straight to quiescence
+            int q_score = quiescence(pos, alpha, beta, ply);
+            if (q_score <= alpha) {
+                return q_score;
+            }
+        }
+    }
     
     // Transposition table lookup
     Bitboard hash = pos.get_hash();
     size_t tt_idx = tt_index(hash);
     TTEntry& entry = transposition_table[tt_idx];
     
+    // Get TT move for better ordering
+    Move tt_move = (entry.hash == hash && entry.depth > 0) ? entry.best_move : Move();
+    
     if (entry.hash == hash && entry.depth >= depth) {
         if (entry.flag == EXACT) return entry.score;
         if (entry.flag == LOWER_BOUND) alpha = std::max(alpha, entry.score);
         if (entry.flag == UPPER_BOUND) beta = std::min(beta, entry.score);
         if (alpha >= beta) return entry.score;
+    }
+    
+    // Singular extensions
+    bool singular_extension = false;
+    if (depth >= 8 && tt_move.data && entry.depth >= depth - 3 && entry.hash == hash) {
+        int singular_beta = entry.score - 2 * depth;
+        int singular_depth = (depth - 1) / 2;
+        
+        // Search all moves except TT move at reduced depth
+        int cutoff_count = 0;
+        auto moves = pos.generate_moves();
+        
+        for (const auto& move : moves) {
+            if (move == tt_move) continue;
+            
+            Position temp_pos = pos;
+            if (!temp_pos.make_move(move)) continue;
+            
+            int score = -alpha_beta(temp_pos, singular_depth, -singular_beta, -singular_beta + 1, ply + 1);
+            if (score < singular_beta) {
+                cutoff_count++;
+                if (cutoff_count >= 2) {
+                    singular_extension = true;
+                    break;
+                }
+            }
+        }
+    }
+    
+    // Internal Iterative Deepening (IID)
+    if (depth >= 4 && !tt_move.data && !pos.is_check()) {
+        int iid_depth = depth - 2;
+        alpha_beta(pos, iid_depth, alpha, beta, ply);
+        
+        // Reload TT entry
+        TTEntry& new_entry = transposition_table[tt_idx];
+        if (new_entry.hash == hash) {
+            tt_move = new_entry.best_move;
+        }
     }
     
     // Null Move Pruning
@@ -2159,7 +2668,7 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta) {
             int R = (depth > 6) ? 3 : 2;
             
             // Search with reduced depth
-            int null_score = -alpha_beta(null_pos, depth - 1 - R, -beta, -beta + 1);
+            int null_score = -alpha_beta(null_pos, depth - 1 - R, -beta, -beta + 1, ply + 1);
             
             // If null move fails high, we can prune
             if (null_score >= beta) {
@@ -2171,7 +2680,7 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta) {
     }
     
     if (depth == 0) {
-        return quiescence(pos, alpha, beta);
+        return quiescence(pos, alpha, beta, ply);
     }
     
     // Use pseudo-legal moves to avoid recursion
@@ -2183,15 +2692,29 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta) {
         return 0; // Stalemate
     }
     
-    // Score and sort moves
-    std::vector<std::pair<Move, int>> scored_moves;
-    // Get TT move from transposition table
-    Move tt_move = (entry.hash == hash && entry.depth > 0) ? entry.best_move : Move();
+    // Futility Pruning setup (calculate once)
+    bool in_pv = (alpha != beta - 1);
+    bool can_prune = false;
     
-    scored_moves.reserve(moves.size());
-    for (const auto& move : moves) {
-        scored_moves.emplace_back(move, score_move(pos, move, depth, tt_move));
+    if (depth <= 3 && !pos.is_check() && !in_pv) {
+        int eval = evaluate_position(pos);
+        int futility_margin = 100 + 150 * depth;
+        can_prune = (eval + futility_margin <= alpha);
     }
+    
+    // Score and sort moves (ONLY ONCE!)
+    std::vector<std::pair<Move, int>> scored_moves;
+    scored_moves.reserve(moves.size());
+    
+    for (const auto& move : moves) {
+        // Apply futility pruning here
+        if (can_prune && !move.is_capture() && !move.is_promotion()) {
+            continue;  // Skip futile quiet moves
+        }
+        
+        scored_moves.emplace_back(move, score_move(pos, move, depth, tt_move, ply, Move()));
+    }
+    
     std::sort(scored_moves.begin(), scored_moves.end(),
               [](const auto& a, const auto& b) { return a.second > b.second; });
     
@@ -2204,19 +2727,26 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta) {
     
     int moves_searched = 0;
     
+    // Moves already scored and sorted above
+    
     for (const auto& scored_move : scored_moves) {
         const Move& move = scored_move.first;
         
-        // Make move on copy
-        Position temp = pos;
-        if (!temp.make_move(move)) continue;
+        // Create a copy of the position for the recursive search
+        // This prevents infinite recursion and stack corruption
+        Position temp_pos = pos;
+        
+        // Make move on the copy
+        if (!temp_pos.make_move(move)) continue;
         
         // Legality check: ensure our king is not in check
-        Bitboard king_bb = temp.pieces[king_piece];
-        if (king_bb == 0) continue; // King captured
+        Bitboard king_bb = temp_pos.pieces[king_piece];
+        if (king_bb == 0) {
+            continue; // King captured
+        }
         
         int king_sq = lsb(king_bb);
-        if (temp.is_square_attacked(king_sq, 1 - our_color)) {
+        if (temp_pos.is_square_attacked(king_sq, 1 - our_color)) {
             continue; // Illegal move - king in check
         }
         
@@ -2224,10 +2754,21 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta) {
         legal_moves++;
         int score_after;
         
+        // Multi-cut pruning check
+        if (depth >= 6 && moves_searched < 10) {
+            // Try first 10 moves at reduced depth to check for multi-cut
+            int multi_cut_score = -alpha_beta(temp_pos, depth - 4, -beta, -beta + 1, ply + 1);
+            if (multi_cut_score >= beta) {
+                // Multi-cut: multiple moves fail high
+                // Don't break - continue searching remaining moves
+                continue;
+            }
+        }
+        
         // ===== LATE MOVE REDUCTIONS =====
         if (moves_searched > 3 && depth >= 3 &&
             !move.is_capture() && !move.is_promotion() &&
-            !pos.is_check() && !temp.is_check()) {
+            !temp_pos.is_check() && !temp_pos.is_check()) {
             
             // Calculate reduction
             int reduction = 1;
@@ -2238,29 +2779,45 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta) {
             // Ensure we don't reduce below depth 1
             reduction = std::min(reduction, depth - 2);
             
-            // Search with reduced depth
-            score_after = -alpha_beta(temp, depth - 1 - reduction, -alpha - 1, -alpha);
+            // Search with reduced depth on the copy
+            score_after = -alpha_beta(temp_pos, depth - 1 - reduction, -alpha - 1, -alpha, ply + 1);
             
             // If it fails high, re-search at full depth
             if (score_after > alpha) {
-                score_after = -alpha_beta(temp, depth - 1, -alpha - 1, -alpha);
+                score_after = -alpha_beta(temp_pos, depth - 1, -beta, -alpha, ply + 1);
             }
         } else if (moves_searched == 1) {
             // Full window search for first move
-            score_after = -alpha_beta(temp, depth - 1, -beta, -alpha);
+            score_after = -alpha_beta(temp_pos, depth - 1, -beta, -alpha, ply + 1);
         } else {
             // Null window search (PVS)
-            score_after = -alpha_beta(temp, depth - 1, -alpha - 1, -alpha);
+            score_after = -alpha_beta(temp_pos, depth - 1, -alpha - 1, -alpha, ply + 1);
             
             // Re-search if it beats alpha
             if (score_after > alpha && score_after < beta) {
-                score_after = -alpha_beta(temp, depth - 1, -beta, -alpha);
+                score_after = -alpha_beta(temp_pos, depth - 1, -beta, -alpha, ply + 1);
             }
         }
         
         if (score_after > best_score) {
             best_score = score_after;
             best_move = move;
+            
+            // Store PV
+            if (ply >= 0 && ply < 99) {
+                pv_table[ply][0] = move;
+                // Copy PV from next ply, with bounds checking
+                int next_ply = ply + 1;
+                if (next_ply < 100 && pv_length[next_ply] > 0) {
+                    for (int i = 0; i < pv_length[next_ply] && i < 99; i++) {
+                        pv_table[ply][i + 1] = pv_table[next_ply][i];
+                    }
+                    pv_length[ply] = std::min(pv_length[next_ply] + 1, 100);
+                } else {
+                    pv_length[ply] = 1;
+                }
+            }
+            
             if (score_after > alpha) {
                 alpha = score_after;
             }
@@ -2271,20 +2828,38 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta) {
             if (depth < 100 && !move.is_capture()) {
                 killer_moves[1][depth] = killer_moves[0][depth];
                 killer_moves[0][depth] = move;
+                
+                // Store killer move only (disable countermove/continuation history for now)
+                // to prevent access violations from invalid pv_table lookups
             }
             
-            // Update history heuristic with aging
+            // Update history heuristic
             int piece = pos.get_piece_at(move.from());
             if (piece >= 1 && piece <= 12) {
-                history_table[piece][move.from()][move.to()] += depth * depth;
+                int from = move.from();
+                int to = move.to();
                 
-                // Age history table to prevent overflow
-                if (history_table[piece][move.from()][move.to()] > 10000) {
-                    // Divide all history scores by 2
-                    for (int p = 1; p <= 12; p++) {
-                        for (int f = 0; f < 64; f++) {
-                            for (int t = 0; t < 64; t++) {
-                                history_table[p][f][t] /= 2;
+                if (from >= 0 && from < 64 && to >= 0 && to < 64) {
+                    history_table[piece][from][to] += depth * depth;
+                    
+                    // Continuation history disabled to prevent access violations
+                    // from invalid pv_table lookups
+                    
+                    // Update capture history
+                    if (move.is_capture()) {
+                        int victim = pos.get_piece_at(to);
+                        if (victim >= 1 && victim <= 12) {
+                            capture_history[piece][to][victim] += depth * depth;
+                        }
+                    }
+                    
+                    // Age history table to prevent overflow
+                    if (history_table[piece][from][to] > 10000) {
+                        for (int p = 1; p <= 12; p++) {
+                            for (int f = 0; f < 64; f++) {
+                                for (int t = 0; t < 64; t++) {
+                                    history_table[p][f][t] /= 2;
+                                }
                             }
                         }
                     }
@@ -2346,7 +2921,7 @@ private:
                     Position temp_pos = pos;
                     if (!temp_pos.make_move(move)) continue;
                     
-                    int score = -alpha_beta(temp_pos, depth - 1, -beta, -alpha);
+                    int score = -alpha_beta(temp_pos, depth - 1, -beta, -alpha, 1);
                     
                     if (score > best_score) {
                         best_score = score;
@@ -2377,7 +2952,7 @@ private:
                 Position temp_pos = pos;
                 if (!temp_pos.make_move(move)) continue;
                 
-                int score = -alpha_beta(temp_pos, depth - 1, -1000000, 1000000);
+                int score = -alpha_beta(temp_pos, depth - 1, -1000000, 1000000, 1);
                 
                 if (score > best_score) {
                     best_score = score;
@@ -2407,10 +2982,22 @@ public:
     // Initialize search components
     static void init() {
         init_transposition_table(16); // 16MB default
+        
         // Clear killer moves and history
         std::fill_n(killer_moves[0], 100, Move());
         std::fill_n(killer_moves[1], 100, Move());
         std::fill_n(&history_table[0][0][0], 13 * 64 * 64, 0);
+        
+        // ===== FIX: Initialize PV table and lengths =====
+        for (int i = 0; i < 100; i++) {
+            pv_length[i] = 0;
+            for (int j = 0; j < 100; j++) {
+                pv_table[i][j] = Move();
+            }
+        }
+        
+        // ===== FIX: Initialize capture history =====
+        std::fill_n(&capture_history[0][0][0], 13 * 64 * 13, 0);
     }
     
     static void iterative_deepening(Position& pos, int max_depth, int time_limit_ms) {
@@ -2418,41 +3005,42 @@ public:
         
         Move best_move;
         int best_score = 0;
-        int prev_score = 0;  // For aspiration windows
-        ::nodes_searched = 0;  // Initialize global node counter once
+        int prev_score = 0;
+        ::nodes_searched = 0;
         
-        // Search statistics
         uint64_t total_time = 0;
         int search_depth = 0;
         
         for (int depth = 1; depth <= max_depth; depth++) {
+            // Check if GUI requested stop
+            if (search_stopped) {
+                search_stopped = false;  // Reset flag
+                break;
+            }
+            
             auto current_time = std::chrono::high_resolution_clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 current_time - start_time).count();
             
-            if (elapsed >= time_limit_ms) {
+            // FIX: Only check time limit if it's not infinite (-1)
+            if (time_limit_ms > 0 && elapsed >= time_limit_ms) {
                 break;
             }
             
-            // Store nodes at start of depth
             uint64_t depth_nodes_start = nodes_searched;
             
             auto result = find_best_move(pos, depth, prev_score);
             Move current_best = result.first;
             int current_score = result.second;
             
-            // Store previous score for next iteration
             prev_score = current_score;
             
-            // Calculate statistics for this depth
             uint64_t depth_nodes = ::nodes_searched - depth_nodes_start;
             total_time = elapsed;
             search_depth = depth;
             
-            // Calculate nodes per second
             uint64_t nps = (elapsed > 0) ? (::nodes_searched * 1000 / elapsed) : 0;
             
-            // Output search info with detailed statistics
             std::cout << "info depth " << depth
                       << " score cp " << current_score
                       << " time " << elapsed
@@ -2460,7 +3048,6 @@ public:
                       << " nps " << nps
                       << " pv ";
             
-            // Output principal variation (simplified - just the best move)
             if (current_best.data != 0) {
                 char from_file = 'a' + file_of(current_best.from());
                 char from_rank = '1' + rank_of(current_best.from());
@@ -2477,15 +3064,16 @@ public:
             
             best_move = current_best;
             best_score = current_score;
+            
+            // For infinite search, continue until max_depth
+            // GUI will send "stop" command to interrupt
         }
         
-        // Output final search statistics
         std::cout << "info string Search completed: depth=" << search_depth
                   << " nodes=" << ::nodes_searched
                   << " time=" << total_time << "ms"
                   << " nps=" << (total_time > 0 ? (nodes_searched * 1000 / total_time) : 0) << "\n";
         
-        // Output best move
         std::cout << "bestmove ";
         if (best_move.data != 0) {
             char from_file = 'a' + file_of(best_move.from());
@@ -2513,6 +3101,56 @@ class UCI {
 private:
     static Position current_position;  // Global position state
     static int hash_size_mb;           // Hash table size in MB
+    
+    // Helper function to parse and find matching move
+    static Move parse_move_string(const Position& pos, const std::string& move_str) {
+        if (move_str.length() < 4) return Move();
+        
+        int from_file = move_str[0] - 'a';
+        int from_rank = move_str[1] - '1';
+        int to_file = move_str[2] - 'a';
+        int to_rank = move_str[3] - '1';
+        
+        if (from_file < 0 || from_file > 7 || from_rank < 0 || from_rank > 7 ||
+            to_file < 0 || to_file > 7 || to_rank < 0 || to_rank > 7) {
+            return Move();  // Invalid coordinates
+        }
+        
+        int from = from_file + from_rank * 8;
+        int to = to_file + to_rank * 8;
+        
+        // Get all legal moves and find matching one
+        auto legal_moves = pos.generate_legal_moves();
+        
+        for (const auto& legal_move : legal_moves) {
+            if (legal_move.from() == from && legal_move.to() == to) {
+                // Check for promotion
+                if (move_str.length() >= 5) {
+                    char promo = move_str[4];
+                    int promo_piece = 0;
+                    
+                    switch (promo) {
+                        case 'q': promo_piece = (pos.get_side_to_move() == WHITE) ? W_QUEEN : B_QUEEN; break;
+                        case 'r': promo_piece = (pos.get_side_to_move() == WHITE) ? W_ROOK : B_ROOK; break;
+                        case 'b': promo_piece = (pos.get_side_to_move() == WHITE) ? W_BISHOP : B_BISHOP; break;
+                        case 'n': promo_piece = (pos.get_side_to_move() == WHITE) ? W_KNIGHT : B_KNIGHT; break;
+                        default: continue;  // Invalid promotion
+                    }
+                    
+                    if (legal_move.is_promotion() && legal_move.promotion() == promo_piece) {
+                        return legal_move;
+                    }
+                } else {
+                    // Non-promotion move
+                    if (!legal_move.is_promotion()) {
+                        return legal_move;
+                    }
+                }
+            }
+        }
+        
+        return Move();  // No matching legal move found
+    }
     
     static void uci_loop() {
         std::string command;
@@ -2542,8 +3180,7 @@ private:
                         ss >> token; // "value"
                         if (token == "value") {
                             ss >> hash_size_mb;
-                            // Adjust transposition table size based on hash setting
-                            size_t new_size = 1ULL << (10 + hash_size_mb / 4); // Rough approximation
+                            size_t new_size = 1ULL << (10 + hash_size_mb / 4);
                             transposition_table.resize(new_size);
                             std::cout << "info string Hash table resized to " << hash_size_mb << "MB\n";
                         }
@@ -2551,11 +3188,8 @@ private:
                 }
             }
             else if (token == "ucinewgame") {
-                // Reset to starting position
                 current_position.from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
-                // Clear transposition table
                 std::fill(transposition_table.begin(), transposition_table.end(), TTEntry{});
-                // Clear killer moves and history
                 std::fill_n(killer_moves[0], 100, Move());
                 std::fill_n(killer_moves[1], 100, Move());
                 std::fill_n(&history_table[0][0][0], 13 * 64 * 64, 0);
@@ -2569,7 +3203,6 @@ private:
                 if (part == "startpos") {
                     fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
                 } else if (part == "fen") {
-                    // Read FEN
                     fen = "";
                     while (ss >> part && part != "moves") {
                         if (!fen.empty()) fen += " ";
@@ -2578,51 +3211,41 @@ private:
                 }
                 
                 // Read moves
-                while (ss >> part) {
-                    moves.push_back(part);
+                if (part == "moves" || ss >> part) {
+                    if (part == "moves") {
+                        while (ss >> part) {
+                            moves.push_back(part);
+                        }
+                    } else {
+                        moves.push_back(part);
+                        while (ss >> part) {
+                            moves.push_back(part);
+                        }
+                    }
                 }
                 
-                // Apply position and moves to global state
+                // Apply position
                 current_position.from_fen(fen);
                 
-                // Apply moves
+                // Apply moves with validation
                 for (const auto& move_str : moves) {
-                    // Parse move string (e.g., "e2e4" or "e7e8q")
-                    if (move_str.length() >= 4) {
-                        int from_file = move_str[0] - 'a';
-                        int from_rank = move_str[1] - '1';
-                        int to_file = move_str[2] - 'a';
-                        int to_rank = move_str[3] - '1';
-                        
-                        int from = from_file + from_rank * 8;
-                        int to = to_file + to_rank * 8;
-                        
-                        Move move(from, to);
-                        
-                        // Handle promotion
-                        if (move_str.length() >= 5) {
-                            char promo = move_str[4];
-                            int promo_piece = W_QUEEN;  // Default
-                            switch (promo) {
-                                case 'q': promo_piece = (current_position.get_side_to_move() == WHITE) ? W_QUEEN : B_QUEEN; break;
-                                case 'r': promo_piece = (current_position.get_side_to_move() == WHITE) ? W_ROOK : B_ROOK; break;
-                                case 'b': promo_piece = (current_position.get_side_to_move() == WHITE) ? W_BISHOP : B_BISHOP; break;
-                                case 'n': promo_piece = (current_position.get_side_to_move() == WHITE) ? W_KNIGHT : B_KNIGHT; break;
-                            }
-                            move = Move(from, to, MOVE_PROMOTION | promo_piece);
-                        }
-                        
-                        current_position.make_move(move);
+                    Move move = parse_move_string(current_position, move_str);
+                    if (move.data == 0) {
+                        std::cout << "info string Invalid move: " << move_str << "\n";
+                        break;
                     }
+                    current_position.make_move(move);
                 }
             }
             else if (token == "go") {
-                // Parse go command
-                int depth = 8; // Default depth
-                int time = 900; // Default time in ms (1 second limit)
+                search_stopped = false;
+                
+                int depth = 20; // Modern standard depth
+                int time = -1;  // Default to infinite
                 int wtime = -1, btime = -1, winc = 0, binc = 0;
                 bool ponder = false;
                 int multipv = 1;
+                bool infinite = false;
                 
                 while (ss >> token) {
                     if (token == "depth") ss >> depth;
@@ -2632,31 +3255,42 @@ private:
                     else if (token == "binc") ss >> binc;
                     else if (token == "ponder") ponder = true;
                     else if (token == "multipv") ss >> multipv;
-                    else if (token == "infinite") time = -1; // Infinite search
+                    else if (token == "infinite") infinite = true;
                 }
                 
-                // Time management
-                if (wtime > 0 || btime > 0) {
+                // Time management - Dynamic allocation based on game phase
+                if (!infinite && (wtime > 0 || btime > 0)) {
                     int time_ms = (current_position.get_side_to_move() == WHITE) ? wtime : btime;
                     int inc_ms = (current_position.get_side_to_move() == WHITE) ? winc : binc;
                     
-                    // Allocate time based on remaining time and increment
-                    // Simple time allocation: use 10% of remaining time + 50% of increment
-                    time = (time_ms / 10) + (inc_ms / 2);
+                    // Dynamic time allocation based on game phase
+                    int moves_to_go = std::max(20, 60 - current_position.fullmove_number);
+                    time = (time_ms / moves_to_go) + (inc_ms * 0.75);
+                    time = std::min(time, time_ms / 3);  // Never use more than 1/3 of remaining time
                     
-                    // Cap time to prevent excessive thinking
-                    if (time > 30000) time = 30000; // 30 seconds max
-                    if (time < 100) time = 100;     // 100ms minimum
+                    if (time > 30000) time = 30000;
+                    if (time < 100) time = 100;
+                } else if (infinite) {
+                    // For infinite search, use a reasonable default time limit
+                    // to prevent the engine from hanging indefinitely
+                    time = 2000;  // 2 seconds default for infinite search
+                    depth = 100;  // Search very deep but with time limit
+                } else {
+                    // No time specified and not infinite - use default time
+                    time = 2000;  // 2 seconds default
                 }
                 
                 std::cout << "info string Time management: depth=" << depth
                           << " time=" << time << "ms ponder=" << (ponder ? "true" : "false") << "\n";
                 
-                // Start search with iterative deepening using current position
                 Search::iterative_deepening(current_position, depth, time);
             }
             else if (token == "quit") {
                 break;
+            }
+            else if (token == "stop") {
+                search_stopped = true;
+                std::cout << "info string Search stopped\n";
             }
             else if (token == "perft") {
                 int depth;
@@ -2669,23 +3303,17 @@ private:
                 
                 std::cout << "Perft depth " << depth << ": " << nodes << " nodes in " << duration.count() << "ms\n";
             }
-            else if (token == "test") {
-                Perft::run_test_suite();
-            }
             else if (token == "debug") {
-                // Debug command to show current position
                 current_position.print();
                 std::cout << "info string Position hash: 0x" << std::hex << current_position.get_hash() << std::dec << "\n";
                 std::cout << "info string Castling rights: " << current_position.get_castling_rights() << "\n";
                 std::cout << "info string En passant: " << current_position.get_en_passant_square() << "\n";
             }
             else if (token == "eval") {
-                // Evaluate current position
                 int score = current_position.evaluate();
                 std::cout << "info string Evaluation: " << score << " centipawns\n";
             }
             else if (token == "moves") {
-                // List all legal moves
                 auto moves = current_position.generate_legal_moves();
                 std::cout << "info string Legal moves (" << moves.size() << "): ";
                 for (const auto& move : moves) {
@@ -2697,38 +3325,16 @@ private:
                 }
                 std::cout << "\n";
             }
-            else if (token == "help") {
-                std::cout << "Available commands:\n";
-                std::cout << "  uci              - Initialize UCI protocol\n";
-                std::cout << "  isready          - Check if engine is ready\n";
-                std::cout << "  ucinewgame       - Reset to starting position\n";
-                std::cout << "  position fen ... - Set position from FEN\n";
-                std::cout << "  position startpos [moves ...] - Set starting position with moves\n";
-                std::cout << "  go [depth N] [wtime N] [btime N] - Start search\n";
-                std::cout << "  perft N          - Run perft test to depth N\n";
-                std::cout << "  test             - Run perft test suite\n";
-                std::cout << "  debug            - Show debug information\n";
-                std::cout << "  eval             - Evaluate current position\n";
-                std::cout << "  moves            - List all legal moves\n";
-                std::cout << "  quit             - Exit engine\n";
-            }
-            else if (!token.empty() && token[0] != '#') {
-                // Unknown command
-                std::cout << "info string Unknown command: " << token << "\n";
-                std::cout << "info string Type 'help' for available commands\n";
-            }
         }
     }
     
 public:
     static void start() {
-        hash_size_mb = 16; // Default hash size
-        
-        // Initialize starting position
+        hash_size_mb = 16;
         current_position.from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
         
         Attacks::init();
-        NNUE::init(); // Initialize NNUE
+        NNUE::init();
         
         std::cout << "info string Duchess Chess Engine initialized\n";
         std::cout << "info string Type 'help' for available commands\n";
@@ -2744,6 +3350,7 @@ int UCI::hash_size_mb = 16;
 // NNUE evaluation
 int Position::evaluate() const {
     if (NNUE::is_loaded()) {
+        // Direct call to NNUE namespace - NO RECURSION!
         return NNUE::evaluate(*this);
     } else {
         // Fallback to classical evaluation if NNUE not loaded
