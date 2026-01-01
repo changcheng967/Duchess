@@ -306,22 +306,16 @@ void Attacks::init_line_attacks() {
     }
 }
 
-// Magic bitboard structure for faster sliding piece attacks
-struct Magic {
-    Bitboard mask;
-    Bitboard magic;
-    Bitboard* attacks;
-    int shift;
-};
-
-static Magic bishop_magics[64];
-static Magic rook_magics[64];
-static Bitboard bishop_attacks_table[64][512];  // Max 512 entries per square
-static Bitboard rook_attacks_table[64][4096];   // Max 4096 entries per square
-
 // ==================== MAGIC BITBOARDS ====================
 
 namespace MagicBitboards {
+    // Magic bitboard structure for faster sliding piece attacks
+    struct Magic {
+        Bitboard mask;
+        Bitboard magic;
+        Bitboard* attacks;
+        int shift;
+    };
     // Rook magic numbers (pre-computed)
     const Bitboard rook_magics[64] = {
         0x0080001020400080ULL, 0x0040001000200040ULL, 0x0080081000200080ULL, 0x0080040800100080ULL,
@@ -341,7 +335,7 @@ namespace MagicBitboards {
         0x00FFFCDDFCED714AULL, 0x007FFCDDFCED714AULL, 0x003FFFCDFFD88096ULL, 0x0000040810002101ULL,
         0x0001000204080011ULL, 0x0001000204000801ULL, 0x0001000082000401ULL, 0x0001FFFAABFAD1A2ULL
     };
-
+    
     // Bishop magic numbers (pre-computed)
     const Bitboard bishop_magics[64] = {
         0x0002020202020200ULL, 0x0002020202020000ULL, 0x0004010202000000ULL, 0x0004040080000000ULL,
@@ -363,16 +357,16 @@ namespace MagicBitboards {
     };
 
     // Masks for relevant occupancy bits
-    Bitboard rook_masks[64];
-    Bitboard bishop_masks[64];
+    static Bitboard rook_masks[64];
+    static Bitboard bishop_masks[64];
     
     // Shift amounts (64 - number of relevant bits)
-    int rook_shifts[64];
-    int bishop_shifts[64];
+    static int rook_shifts[64];
+    static int bishop_shifts[64];
     
     // Attack tables
-    Bitboard rook_attacks[64][4096];
-    Bitboard bishop_attacks[64][512];
+    static Bitboard rook_attacks[64][4096];
+    static Bitboard bishop_attacks[64][512];
     
     // Helper: Generate rook mask
     Bitboard rook_mask(int sq) {
@@ -533,6 +527,14 @@ namespace MagicBitboards {
         return bishop_attacks[sq][occ];
     }
 }
+
+// Initialize static members
+Bitboard MagicBitboards::rook_masks[64];
+Bitboard MagicBitboards::bishop_masks[64];
+int MagicBitboards::rook_shifts[64];
+int MagicBitboards::bishop_shifts[64];
+Bitboard MagicBitboards::rook_attacks[64][4096];
+Bitboard MagicBitboards::bishop_attacks[64][512];
 
 // Helper function to get bishop blocker mask
 Bitboard get_bishop_blockers(int sq) {
@@ -2291,18 +2293,58 @@ bool Position::is_check() const {
 
 bool Position::is_checkmate() const {
     if (!is_check()) return false;
+    
+    // Check if there are any legal moves
     auto moves = generate_moves();
+    int our_color = side_to_move;
+    int king_piece = (our_color == WHITE) ? W_KING : B_KING;
+    
     for (const auto& move : moves) {
-        // Would need to check if move gets out of check
-        // Simplified for now
+        // Try the move on a copy of the position
+        Position temp_pos = *this;
+        if (!temp_pos.make_move(move)) continue;
+        
+        // Check if our king is still in check after the move
+        Bitboard new_king_bb = temp_pos.pieces[king_piece];
+        if (new_king_bb == 0) continue; // King captured (illegal)
+        
+        int new_king_sq = lsb(new_king_bb);
+        if (!temp_pos.is_square_attacked(new_king_sq, 1 - our_color)) {
+            // Found a legal move that gets out of check
+            return false;
+        }
     }
-    return false; // Simplified
+    
+    // No legal moves found and we're in check - it's checkmate
+    return true;
 }
 
 bool Position::is_stalemate() const {
     if (is_check()) return false;
+    
+    // Check if there are any legal moves
     auto moves = generate_moves();
-    return moves.empty();
+    int our_color = side_to_move;
+    int king_piece = (our_color == WHITE) ? W_KING : B_KING;
+    
+    for (const auto& move : moves) {
+        // Try move on a copy of position
+        Position temp_pos = *this;
+        if (!temp_pos.make_move(move)) continue;
+        
+        // Check if our king is still in check after the move
+        Bitboard new_king_bb = temp_pos.pieces[king_piece];
+        if (new_king_bb == 0) continue; // King captured (illegal)
+        
+        int new_king_sq = lsb(new_king_bb);
+        if (!temp_pos.is_square_attacked(new_king_sq, 1 - our_color)) {
+            // Found a legal move - not stalemate
+            return false;
+        }
+    }
+    
+    // No legal moves found and not in check - it's stalemate
+    return true;
 }
 
 bool Position::is_repetition() const {
