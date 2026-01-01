@@ -2158,10 +2158,9 @@ struct ComplexityTracker {
     }
     
     int get_time_allocation() const {
-        if (is_critical_position()) return 10000;
-        if (is_complex()) return 6000;
-        if (is_stable()) return 2000;
-        return 4000;
+        // Fixed: Always return 2000ms (2 seconds) to meet requirement
+        // Complexity-based allocation can cause timeouts
+        return 2000;
     }
 };
 
@@ -3208,31 +3207,24 @@ public:
         complexity_tracker.king_safety_score = evaluate_king_safety(pos);
         
         Move best_move;
-        int best_score = 0;
+        int best_score = -1000000;
         int prev_score = 0;
         ::nodes_searched = 0;
+        bool move_found = false;
         
         uint64_t total_time = 0;
         int search_depth = 0;
         
-        for (int depth = 1; depth <= max_depth; depth++) {
+        // Limit max depth based on time to ensure fast responses
+        int effective_max_depth = max_depth;
+        if (time_limit_ms > 0 && time_limit_ms <= 2000) {
+            effective_max_depth = std::min(max_depth, 10); // Cap at depth 10 for 2s limit
+        }
+        
+        for (int depth = 1; depth <= effective_max_depth; depth++) {
             // Check if GUI requested stop
             if (search_stopped) {
                 search_stopped = false;  // Reset flag
-                break;
-            }
-            
-            auto current_time = std::chrono::high_resolution_clock::now();
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                current_time - start_time).count();
-            
-            int adaptive_time_limit = time_limit_ms;
-            if (time_limit_ms > 0) {
-                adaptive_time_limit = complexity_tracker.get_time_allocation();
-                adaptive_time_limit = std::min(adaptive_time_limit, time_limit_ms);
-            }
-            
-            if (adaptive_time_limit > 0 && elapsed >= adaptive_time_limit) {
                 break;
             }
             
@@ -3241,6 +3233,33 @@ public:
             auto result = find_best_move(pos, depth, prev_score);
             Move current_best = result.first;
             int current_score = result.second;
+            
+            // Check time AFTER completing the search for this depth
+            auto current_time = std::chrono::high_resolution_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                current_time - start_time).count();
+            
+            int adaptive_time_limit = time_limit_ms;
+            if (time_limit_ms <= 0) {
+                // No time limit specified - use adaptive time based on complexity
+                adaptive_time_limit = complexity_tracker.get_time_allocation();
+            } else {
+                // Time limit specified - use adaptive but don't exceed it
+                adaptive_time_limit = std::min(complexity_tracker.get_time_allocation(), time_limit_ms);
+            }
+            
+            // Always complete at least depth 1 before checking time
+            // Use 90% of time limit to ensure we return before timeout
+            if (move_found && adaptive_time_limit > 0 && elapsed >= (adaptive_time_limit * 9 / 10)) {
+                break;
+            }
+            
+            // Update best move (always update with current depth's best)
+            if (current_best.data != 0) {
+                best_move = current_best;
+                best_score = current_score;
+                move_found = true;
+            }
             
             complexity_tracker.add_eval_score(current_score);
             complexity_tracker.add_best_move(current_best);
@@ -3273,9 +3292,6 @@ public:
                 }
             }
             std::cout << "\n";
-            
-            best_move = current_best;
-            best_score = current_score;
             
         }
         
@@ -3481,9 +3497,9 @@ private:
                     if (time < 100) time = 100;
                 } else if (infinite) {
                     // For infinite search, use a reasonable default time limit
-                    // to prevent the engine from hanging indefinitely
+                    // to prevent engine from hanging indefinitely
                     time = 2000;  // 2 seconds default for infinite search
-                    depth = 100;  // Search very deep but with time limit
+                    depth = 20;  // Search deep but with 2s time limit
                 } else {
                     // No time specified and not infinite - use default time
                     time = 2000;  // 2 seconds default
@@ -3543,11 +3559,7 @@ public:
         hash_size_mb = 16;
         current_position.from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
         
-        Attacks::init();
-        NNUE::init();
-        
-        std::cout << "info string Duchess Chess Engine initialized\n";
-        std::cout << "info string Type 'help' for available commands\n";
+        // Note: Attacks::init(), Search::init(), and NNUE::init() already called in main()
         
         uci_loop();
     }
@@ -3589,75 +3601,12 @@ int Position::evaluate() const {
 // ==================== MAIN FUNCTION ====================
 
 int main() {
-    std::cout << "Duchess Chess Engine - Phase 1: Foundation\n";
-    std::cout << "==========================================\n";
-    
-    // Initialize all components
+    // Initialize all components once
     Attacks::init();
     Search::init(); // Initialize search components (includes heap allocation)
     NNUE::init();   // Initialize NNUE evaluation
     
-    // Test basic functionality
-    Position pos;
-    std::cout << "Starting position:\n";
-    
-    // Debug: Print piece bitboards
-    for (int p = 1; p <= 12; p++) {
-        std::cout << "Piece " << p << " (" << ".PNBRQKpnbrQk"[p] << "): ";
-        Bitboard b = pos.get_pieces(p);
-        for (int sq = 0; sq < 64; sq++) {
-            if (b & SQ(sq)) {
-                std::cout << sq << " ";
-            }
-        }
-        std::cout << "\n";
-    }
-    
-    pos.print();
-    
-    auto moves = pos.generate_moves();
-    std::cout << "\nGenerated " << moves.size() << " pseudo-legal moves\n";
-    
-    // Debug castling
-    std::cout << "Castling rights: " << pos.get_castling_rights() << "\n";
-    std::cout << "White KS: " << (pos.get_castling_rights() & WHITE_KS) << "\n";
-    std::cout << "White QS: " << (pos.get_castling_rights() & WHITE_QS) << "\n";
-    
-    // Test evaluation
-    std::cout << "\nEvaluating position...\n";
-    int eval = pos.evaluate();
-    std::cout << "Evaluation: " << eval << " centipawns\n";
-    
-    // Test NNUE feature indexing (debug)
-    if (NNUE::is_loaded()) {
-        std::cout << "NNUE loaded successfully - testing feature indexing...\n";
-        
-        // Test a few pieces
-        int white_pawn_sq = 8;  // a2
-        int white_king_sq = 4;  // e1
-        int black_king_sq = 60; // e8
-        
-        int idx1 = NNUE::get_feature_index(W_PAWN, white_pawn_sq, white_king_sq, true);
-        int idx2 = NNUE::get_feature_index(B_PAWN, white_pawn_sq, black_king_sq, false);
-        
-        std::cout << "White pawn at a2 (white perspective): " << idx1 << "\n";
-        std::cout << "Black pawn at a2 (black perspective): " << idx2 << "\n";
-        std::cout << "Feature indices should be different for different perspectives\n";
-    } else {
-        std::cout << "NNUE not loaded - using classical evaluation\n";
-    }
-    
-    // Test perft
-    std::cout << "\nTesting perft (depth 3):\n";
-    auto start = std::chrono::high_resolution_clock::now();
-    uint64_t nodes = Perft::perft(pos, 3);
-    auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-    
-    std::cout << "Perft(3): " << nodes << " nodes in " << duration.count() << "ms\n";
-    
-    // Start UCI loop
-    std::cout << "\nStarting UCI protocol...\n";
+    // Start UCI loop immediately (no test code to delay startup)
     UCI::start();
     
     // Cleanup before exit
