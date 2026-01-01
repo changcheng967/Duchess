@@ -309,13 +309,6 @@ void Attacks::init_line_attacks() {
 // ==================== MAGIC BITBOARDS ====================
 
 namespace MagicBitboards {
-    // Magic bitboard structure for faster sliding piece attacks
-    struct Magic {
-        Bitboard mask;
-        Bitboard magic;
-        Bitboard* attacks;
-        int shift;
-    };
     // Rook magic numbers (pre-computed)
     const Bitboard rook_magics[64] = {
         0x0080001020400080ULL, 0x0040001000200040ULL, 0x0080081000200080ULL, 0x0080040800100080ULL,
@@ -367,38 +360,6 @@ namespace MagicBitboards {
     // Attack tables
     static Bitboard rook_attacks[64][4096];
     static Bitboard bishop_attacks[64][512];
-    
-    // Helper: Generate rook mask
-    Bitboard rook_mask(int sq) {
-        Bitboard result = 0ULL;
-        int rank = sq / 8;
-        int file = sq % 8;
-        
-        for (int r = rank + 1; r <= 6; r++) result |= (1ULL << (r * 8 + file));
-        for (int r = rank - 1; r >= 1; r--) result |= (1ULL << (r * 8 + file));
-        for (int f = file + 1; f <= 6; f++) result |= (1ULL << (rank * 8 + f));
-        for (int f = file - 1; f >= 1; f--) result |= (1ULL << (rank * 8 + f));
-        
-        return result;
-    }
-    
-    // Helper: Generate bishop mask
-    Bitboard bishop_mask(int sq) {
-        Bitboard result = 0ULL;
-        int rank = sq / 8;
-        int file = sq % 8;
-        
-        for (int r = rank + 1, f = file + 1; r <= 6 && f <= 6; r++, f++)
-            result |= (1ULL << (r * 8 + f));
-        for (int r = rank - 1, f = file + 1; r >= 1 && f <= 6; r--, f++)
-            result |= (1ULL << (r * 8 + f));
-        for (int r = rank + 1, f = file - 1; r <= 6 && f >= 1; r++, f--)
-            result |= (1ULL << (r * 8 + f));
-        for (int r = rank - 1, f = file - 1; r >= 1 && f >= 1; r--, f--)
-            result |= (1ULL << (r * 8 + f));
-        
-        return result;
-    }
     
     // Generate attacks for a given occupancy
     Bitboard rook_attacks_on_the_fly(int sq, Bitboard occupied) {
@@ -463,22 +424,45 @@ namespace MagicBitboards {
     void init() {
         // Initialize rook tables
         for (int sq = 0; sq < 64; sq++) {
-            rook_masks[sq] = rook_mask(sq);
+            // Generate rook mask inline
+            int rank = sq / 8;
+            int file = sq % 8;
+            Bitboard mask = 0;
+            
+            // North (excluding edge)
+            for (int r = rank + 1; r <= 6; r++) {
+                mask |= (1ULL << (r * 8 + file));
+            }
+            // South (excluding edge)
+            for (int r = rank - 1; r >= 1; r--) {
+                mask |= (1ULL << (r * 8 + file));
+            }
+            // East (excluding edge)
+            for (int f = file + 1; f <= 6; f++) {
+                mask |= (1ULL << (rank * 8 + f));
+            }
+            // West (excluding edge)
+            for (int f = file - 1; f >= 1; f--) {
+                mask |= (1ULL << (rank * 8 + f));
+            }
+            
+            rook_masks[sq] = mask;
             rook_shifts[sq] = 64 - popcount(rook_masks[sq]);
             
-            Bitboard mask = rook_masks[sq];
-            int n = popcount(mask);
+            Bitboard occ_mask = rook_masks[sq];
+            int n = popcount(occ_mask);
             
             for (int i = 0; i < (1 << n); i++) {
                 Bitboard occupied = 0ULL;
-                Bitboard temp_mask = mask;
-                
-                for (int bit = 0; bit < n; bit++) {
+                Bitboard temp_mask = occ_mask;
+                int bit = 0;
+                while (temp_mask) {
                     int sq_bit = lsb(temp_mask);
                     temp_mask = clear_lsb(temp_mask);
                     if (i & (1 << bit)) {
                         occupied |= (1ULL << sq_bit);
                     }
+                    bit++;
                 }
                 
                 int index = (int)((occupied * rook_magics[sq]) >> rook_shifts[sq]);
@@ -488,22 +472,45 @@ namespace MagicBitboards {
         
         // Initialize bishop tables
         for (int sq = 0; sq < 64; sq++) {
-            bishop_masks[sq] = bishop_mask(sq);
+            // Generate bishop mask inline
+            int rank = sq / 8;
+            int file = sq % 8;
+            Bitboard mask = 0;
+            
+            // NE (excluding edge)
+            for (int r = rank + 1, f = file + 1; r <= 6 && f <= 6; r++, f++) {
+                mask |= (1ULL << (r * 8 + f));
+            }
+            // SE (excluding edge)
+            for (int r = rank - 1, f = file + 1; r >= 1 && f <= 6; r--, f++) {
+                mask |= (1ULL << (r * 8 + f));
+            }
+            // NW (excluding edge)
+            for (int r = rank + 1, f = file - 1; r <= 6 && f >= 1; r++, f--) {
+                mask |= (1ULL << (r * 8 + f));
+            }
+            // SW (excluding edge)
+            for (int r = rank - 1, f = file - 1; r >= 1 && f >= 1; r--, f--) {
+                mask |= (1ULL << (r * 8 + f));
+            }
+            
+            bishop_masks[sq] = mask;
             bishop_shifts[sq] = 64 - popcount(bishop_masks[sq]);
             
-            Bitboard mask = bishop_masks[sq];
-            int n = popcount(mask);
+            Bitboard occ_mask = bishop_masks[sq];
+            int n = popcount(occ_mask);
             
             for (int i = 0; i < (1 << n); i++) {
                 Bitboard occupied = 0ULL;
-                Bitboard temp_mask = mask;
-                
-                for (int bit = 0; bit < n; bit++) {
+                Bitboard temp_mask = occ_mask;
+                int bit = 0;
+                while (temp_mask) {
                     int sq_bit = lsb(temp_mask);
                     temp_mask = clear_lsb(temp_mask);
                     if (i & (1 << bit)) {
                         occupied |= (1ULL << sq_bit);
                     }
+                    bit++;
                 }
                 
                 int index = (int)((occupied * bishop_magics[sq]) >> bishop_shifts[sq]);
@@ -528,7 +535,7 @@ namespace MagicBitboards {
     }
 }
 
-// Initialize static members
+// Static member definitions for MagicBitboards
 Bitboard MagicBitboards::rook_masks[64];
 Bitboard MagicBitboards::bishop_masks[64];
 int MagicBitboards::rook_shifts[64];
@@ -536,168 +543,14 @@ int MagicBitboards::bishop_shifts[64];
 Bitboard MagicBitboards::rook_attacks[64][4096];
 Bitboard MagicBitboards::bishop_attacks[64][512];
 
-// Helper function to get bishop blocker mask
-Bitboard get_bishop_blockers(int sq) {
-    Bitboard blockers = 0;
-    int file = file_of(sq);
-    int rank = rank_of(sq);
-    
-    // Northeast
-    int target = sq + NORTH_EAST;
-    while (target >= 0 && target < 64 && file_of(target) > file && rank_of(target) > rank) {
-        blockers |= SQ(target);
-        target += NORTH_EAST;
-    }
-    
-    // Northwest
-    target = sq + NORTH_WEST;
-    while (target >= 0 && target < 64 && file_of(target) < file && rank_of(target) > rank) {
-        blockers |= SQ(target);
-        target += NORTH_WEST;
-    }
-    
-    // Southeast
-    target = sq + SOUTH_EAST;
-    while (target >= 0 && target < 64 && file_of(target) > file && rank_of(target) < rank) {
-        blockers |= SQ(target);
-        target += SOUTH_EAST;
-    }
-    
-    // Southwest
-    target = sq + SOUTH_WEST;
-    while (target >= 0 && target < 64 && file_of(target) < file && rank_of(target) < rank) {
-        blockers |= SQ(target);
-        target += SOUTH_WEST;
-    }
-    
-    return blockers;
-}
-
-// Helper function to get rook blocker mask
-Bitboard get_rook_blockers(int sq) {
-    Bitboard blockers = 0;
-    int file = file_of(sq);
-    int rank = rank_of(sq);
-    
-    // North
-    int target = sq + NORTH;
-    while (target >= 0 && target < 64 && rank_of(target) > rank) {
-        blockers |= SQ(target);
-        target += NORTH;
-    }
-    
-    // South
-    target = sq + SOUTH;
-    while (target >= 0 && target < 64 && rank_of(target) < rank) {
-        blockers |= SQ(target);
-        target += SOUTH;
-    }
-    
-    // East
-    target = sq + EAST;
-    while (target >= 0 && target < 64 && file_of(target) > file) {
-        blockers |= SQ(target);
-        target += EAST;
-    }
-    
-    // West
-    target = sq + WEST;
-    while (target >= 0 && target < 64 && file_of(target) < file) {
-        blockers |= SQ(target);
-        target += WEST;
-    }
-    
-    return blockers;
-}
-
-// Slow bishop attacks for table generation
-Bitboard bishop_attacks_slow(int sq, Bitboard occupied) {
-    Bitboard attacks = 0;
-    
-    // Northeast
-    int target = sq + NORTH_EAST;
-    while (target >= 0 && target < 64 && file_of(target) > file_of(sq)) {
-        attacks |= SQ(target);
-        if (occupied & SQ(target)) break;
-        target += NORTH_EAST;
-    }
-    
-    // Northwest
-    target = sq + NORTH_WEST;
-    while (target >= 0 && target < 64 && file_of(target) < file_of(sq)) {
-        attacks |= SQ(target);
-        if (occupied & SQ(target)) break;
-        target += NORTH_WEST;
-    }
-    
-    // Southeast
-    target = sq + SOUTH_EAST;
-    while (target >= 0 && target < 64 && file_of(target) > file_of(sq)) {
-        attacks |= SQ(target);
-        if (occupied & SQ(target)) break;
-        target += SOUTH_EAST;
-    }
-    
-    // Southwest
-    target = sq + SOUTH_WEST;
-    while (target >= 0 && target < 64 && file_of(target) < file_of(sq)) {
-        attacks |= SQ(target);
-        if (occupied & SQ(target)) break;
-        target += SOUTH_WEST;
-    }
-    
-    return attacks;
-}
-
-// Slow rook attacks for table generation
-Bitboard rook_attacks_slow(int sq, Bitboard occupied) {
-    Bitboard attacks = 0;
-    
-    // North
-    int target = sq + NORTH;
-    while (target >= 0 && target < 64) {
-        attacks |= SQ(target);
-        if (occupied & SQ(target)) break;
-        target += NORTH;
-    }
-    
-    // South
-    target = sq + SOUTH;
-    while (target >= 0 && target < 64) {
-        attacks |= SQ(target);
-        if (occupied & SQ(target)) break;
-        target += SOUTH;
-    }
-    
-    // East
-    target = sq + EAST;
-    while (target >= 0 && target < 64 && file_of(target) > file_of(sq)) {
-        attacks |= SQ(target);
-        if (occupied & SQ(target)) break;
-        target += EAST;
-    }
-    
-    // West
-    target = sq + WEST;
-    while (target >= 0 && target < 64 && file_of(target) < file_of(sq)) {
-        attacks |= SQ(target);
-        if (occupied & SQ(target)) break;
-        target += WEST;
-    }
-    
-    return attacks;
-}
-
 // Fast magic bitboard bishop attacks
 Bitboard Attacks::bishop_attacks(int sq, Bitboard occupied) {
-    // For now, use the slow but working version
-    return bishop_attacks_slow(sq, occupied);
+    return MagicBitboards::get_bishop_attacks(sq, occupied);
 }
 
 // Fast magic bitboard rook attacks
 Bitboard Attacks::rook_attacks(int sq, Bitboard occupied) {
-    // For now, use the slow but working version
-    return rook_attacks_slow(sq, occupied);
+    return MagicBitboards::get_rook_attacks(sq, occupied);
 }
 
 Bitboard Attacks::queen_attacks(int sq, Bitboard occupied) {
@@ -731,9 +584,6 @@ public:
     
     // Zobrist hash
     Bitboard hash;
-    
-    // Material count
-    int material[2];
     
     // Move history for undo
     std::vector<UndoInfo> history;
@@ -1096,7 +946,6 @@ void Position::from_fen(const std::string& fen) {
     for (int i = 0; i <= 12; i++) pieces[i] = 0;
     occupied[WHITE] = occupied[BLACK] = all_occupied = 0;
     hash = 0;
-    material[WHITE] = material[BLACK] = 0;
     history.clear();  // Clear history for new position
     
     std::istringstream ss(fen);
@@ -2462,12 +2311,6 @@ static int history_table[13][64][64];
 static Move pv_table[100][100];  // PV at each ply
 static int pv_length[100];       // Length at each ply
 
-// Countermove heuristic
-static Move countermove_table[13][64];  // [piece][to_square]
-
-// Continuation history
-static int continuation_history[13][64][13][64];
-
 // Capture history
 static int capture_history[13][64][13];  // [attacker][to][victim]
 
@@ -2520,15 +2363,6 @@ static int score_move(const Position& pos, const Move& move, int depth, const Mo
     if (move == tt_move) {
         return 10000000;  // Highest score
     }
-    
-    // Countermove bonus - DISABLED for now to prevent access violations
-    // This would require tracking previous move piece in parent position
-    // if (ply > 0 && prev_move.data != 0) {
-    //     int prev_piece = pos.get_piece_at(prev_move.to());
-    //     if (move == countermove_table[prev_piece][prev_move.to()]) {
-    //         score += 600000;
-    //     }
-    // }
     
     // MVV-LVA (Most Valuable Victim - Least Valuable Attacker) with SEE
     if (move.is_capture()) {
@@ -2593,19 +2427,8 @@ static int score_move(const Position& pos, const Move& move, int depth, const Mo
     int piece = pos.get_piece_at(move.from());
     if (piece >= 1 && piece <= 12) {
         score += history_table[piece][move.from()][move.to()] * (depth + 1);
-        
-        // Continuation history bonus - DISABLED for now to prevent access violations
-        // This would require tracking previous move piece in parent position
-        // if (ply > 0 && prev_move.data != 0) {
-        //     int to_sq = prev_move.to();
-        //     if (to_sq >= 0 && to_sq < 64) {
-        //         int prev_piece = pos.get_piece_at(to_sq);
-        //         if (prev_piece >= 1 && prev_piece <= 12) {
-        //             score += continuation_history[prev_piece][to_sq][piece][move.to()];
-        //         }
-        //     }
-        // }
     }
+    
     
     // Center control bonus (improved)
     int to_file = file_of(move.to());
@@ -3172,16 +2995,6 @@ public:
                 pv_table[i][j] = Move();
             }
         }
-        
-        // ===== FIX: Initialize countermove table =====
-        for (int p = 0; p < 13; p++) {
-            for (int sq = 0; sq < 64; sq++) {
-                countermove_table[p][sq] = Move();
-            }
-        }
-        
-        // ===== FIX: Initialize continuation history =====
-        std::fill_n(&continuation_history[0][0][0][0], 13 * 64 * 13 * 64, 0);
         
         // ===== FIX: Initialize capture history =====
         std::fill_n(&capture_history[0][0][0], 13 * 64 * 13, 0);
