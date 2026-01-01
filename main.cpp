@@ -2051,9 +2051,21 @@ public:
     std::vector<std::vector<std::vector<int>>> history_table;
     
     SearchContext() {
-        pv_table.resize(100, std::vector<Move>(100, 0));
-        killer_moves.resize(100, {Move(), Move()});
-        history_table.resize(13, std::vector<std::vector<int>>(64, std::vector<int>(64, 0)));
+        pv_table.resize(100);
+        for (int i = 0; i < 100; i++) {
+            pv_table[i].resize(100, Move());
+        }
+        killer_moves.resize(100);
+        for (int i = 0; i < 100; i++) {
+            killer_moves[i] = {Move(), Move()};
+        }
+        history_table.resize(13);
+        for (int i = 0; i < 13; i++) {
+            history_table[i].resize(64);
+            for (int j = 0; j < 64; j++) {
+                history_table[i][j].resize(64, 0);
+            }
+        }
     }
 };
 
